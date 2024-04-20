@@ -1,0 +1,120 @@
+
+use std::mem::clocked_memory;
+use std::mem::read_memory;
+
+use std::ports::new_mut_wire;
+use std::ports::read_mut_wire;
+
+
+struct Result {
+    data: uint<32>,
+    tag: uint<20>,
+    valid: bool,
+}
+
+struct Request {
+    index: uint<13>, // Which 32bit word within the the icache
+}
+
+struct port ICache {
+    request: &mut Request,
+    result: &Result,
+}
+
+pipeline(1) icache_read(clk: clock, icache: ICache, virtual_addr: uint<64>) -> (uint<32>, uint<20>, bool) {
+        set icache.request = Request$(
+            index: trunc(virtual_addr >> 2),
+        );
+    reg;
+        let result = *icache.result;
+        (result.data, result.tag, result.valid)
+}
+
+pipeline(1) instruction_cache(clk: clock, write: Option<(uint<11>, uint<20>, uint<64>)>) -> ICache {
+        let request = inst new_mut_wire();
+
+        let (write_enable, addr, w_tag, data) = match write {
+            Option::Some((addr, tag, data)) => (true, addr, tag, data),
+            Option::None => (false, 0, 0, 0),
+        };
+
+        let w_bank: uint<2> = trunc(addr >> 9);
+        let w_index = trunc(addr);
+
+        let (en0, en1, en2, en3) = match w_bank {
+            0 => (write_enable, false, false, false),
+            1 => (false, write_enable, false, false),
+            2 => (false, false, write_enable, false),
+            3 => (false, false, false, write_enable),
+        };
+
+        // The icache on the r4200/r4300 is implemented as four separate sram banks, indexed by the two
+        // most significant bits of the index.
+        // This is a power-saving measure, as only one of the banks needs to be powered for a read.
+        // There is no critical-word-first logic for instruction fetches
+        let mem0: Memory<uint<64>, 512> = inst clocked_memory(clk, [(en0, w_index, data)]);
+        let mem1: Memory<uint<64>, 512> = inst clocked_memory(clk, [(en1, w_index, data)]);
+        let mem2: Memory<uint<64>, 512> = inst clocked_memory(clk, [(en2, w_index, data)]);
+        let mem3: Memory<uint<64>, 512> = inst clocked_memory(clk, [(en3, w_index, data)]);
+
+        let Request$(index: read_index ) = inst read_mut_wire(request);
+        let read_word: uint<1> = trunc(read_index);
+        let read_addr: uint<12> = trunc(read_index >> 1);
+        let read_bank: uint<2> = trunc(read_addr >> 9);
+
+        reg(clk) prefeteched_addr = read_addr;
+        reg(clk) prefetch_invalid = write_enable; // Make sure we invalidate the prefetch on any write
+
+        // Additionally, there is a 64-bit "Instruction prefetch buffer"
+        // It holds two sequential instructions, fetched as a single read from the cache bank.
+        // It lowers the icache access frequency by almost 50%.
+        // Source:  https://youtu.be/nll5MWlG7q4?t=680
+        let read_enable = !write_enable && ( prefeteched_addr != read_addr || prefetch_invalid);
+        let mem_read_data = if read_enable {
+            match read_bank {
+                0 => inst read_memory(mem0, trunc(read_addr)),
+                1 => inst read_memory(mem1, trunc(read_addr)),
+                2 => inst read_memory(mem2, trunc(read_addr)),
+                3 => inst read_memory(mem3, trunc(read_addr)),
+            }
+        } else {
+            0 // Emulate single-port memory
+        };
+
+        reg(clk) prefetch_buffer = if read_enable { mem_read_data } else { prefetch_buffer };
+
+        let read_data = trunc((if read_enable { mem_read_data } else { prefetch_buffer }) >> (read_word * 32));
+
+        // And then there is a separate SRAM block for tags. Only write it when we get the last
+        // word of the cacheline
+        let tag_write = write_enable && (w_index & 3) == 3;
+        let tag_idx = w_index >> 2;
+
+        // TODO: tag fetches are probably cached too
+        let tag_mem: Memory<uint<21>, 512> = inst clocked_memory(clk, [(tag_write, tag_idx, concat(1, w_tag))]);
+        let read_tag = inst read_memory(tag_mem, trunc(read_addr >> 2));
+
+    reg;
+        let result = Result$ ( data: read_data, tag: trunc(read_tag), valid: read_tag >> 20 == 1);
+
+        ICache$(
+            //request: Request$ ( line: line, offset: offset ),
+            request: request,
+            result: &result,
+        )
+}
+
+#[no_mangle]
+pipeline(1) icache_test_harness(
+    clk: clock,
+    write: Option<(uint<11>, uint<20>, uint<64>)>,
+    addr: uint<64>,
+)
+  -> (uint<32>, uint<20>, bool)
+{
+        let icache = inst(1) instruction_cache(clk, write);
+        let (data, tag, valid) = inst(1) icache_read(clk, icache, addr);
+reg;
+
+        (data, tag, valid)
+}

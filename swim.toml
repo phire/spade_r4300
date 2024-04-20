@@ -1,0 +1,5 @@
+name = "test"
+compiler = { git = "https://gitlab.com/spade-lang/spade.git", branch = "main" }
+
+[simulation]
+testbench_dir = "test"

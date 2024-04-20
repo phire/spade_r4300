@@ -1,0 +1,56 @@
+use std::mem::clocked_memory_init;
+use std::mem::read_memory;
+
+enum RegId {
+    Integer{id: uint<5>},
+    Float{id: uint<5>},
+}
+
+impl RegId {
+    fn index(self) -> uint<6> {
+        match self {
+            RegId::Integer(i) => concat(0, i),
+            RegId::Float(i) => concat(1, i),
+        }
+    }
+
+    fn is_zero(self) -> bool {
+         match self {
+            RegId::Integer(i) => i == 0,
+            _ => false,
+        }
+    }
+}
+
+pipeline(1) regfile(
+    clk: clock,
+    rs: RegId,
+    rt: RegId,
+    write: (RegId, uint<64>),
+)
+    -> (uint<64>, uint<64>)
+{
+        let (rd, write_val) = write;
+        let we = !rd.is_zero();
+
+        // The r4200/r4300 has a unified register file with both integer and floating point registers.
+        // Initialize them all to zero. Because we don't ever write to the zero register, it will stay zero
+        let regs: Memory<uint<64>, 64> = inst clocked_memory_init(
+            clk,
+            [(!rd.is_zero(), rd.index(), write_val)], // write ports
+            [0, 0, 0, 0, 0, 0, 0, 0, // initial values
+             0, 0, 0, 0, 0, 0, 0, 0,
+             0, 0, 0, 0, 0, 0, 0, 0,
+             0, 0, 0, 0, 0, 0, 0, 0,
+             0, 0, 0, 0, 0, 0, 0, 0,
+             0, 0, 0, 0, 0, 0, 0, 0,
+             0, 0, 0, 0, 0, 0, 0, 0,
+             0, 0, 0, 0, 0, 0, 0, 0]
+        );
+
+        let rs_val = inst read_memory(regs, rs.index());
+        let rt_val = inst read_memory(regs, rt.index());
+
+    reg;
+        (rs_val, rt_val)
+}
