@@ -1,0 +1,93 @@
+
+
+
+
+enum RegfileMode {
+    Nop,
+    ReadInterger,
+    ReadFloat,
+    ReadFloatAndUnpack,
+}
+
+enum RFMuxing {
+    RsRt,
+    RsImmSigned,
+    RsImmUnsigned,
+    Shift,
+    Shift64,
+    Memory,
+    Jump26,
+}
+
+enum ExMode {
+    Nop,
+    UnconditionalBranch,
+    Memory,
+
+// Adder
+    Add,
+    Sub,
+    SetLess,
+    SetLessUnsigned,
+    // Compares?
+
+// Shifter
+    ShiftLeft,
+    ShiftRight,
+    ShiftRightArith,
+    ShiftLeft64,
+    ShiftRight64,
+    ShiftRightArith64,
+
+// Logic
+    And,
+    Or,
+    Xor,
+    Nor,
+
+// Multiplier
+    Mul{bits: uint<6>, signed: bool},
+    Div{bits: uint<6>, signed: bool},
+}
+
+struct InstructionInfo {
+    regfile_mode: RegfileMode,
+    rf_muxing: RFMuxing,
+    ex_mode: ExMode,
+}
+
+
+fn decode(ins: uint<32>) -> InstructionInfo {
+    let opcode: uint<6> = trunc(ins >> 26);
+
+    match opcode {
+        0b000000 => decode_special(ins),
+        0b000001 => decode_regimm(ins),
+        0b000010 => InstructionInfo$( // J
+            regfile_mode: RegfileMode::ReadInterger,
+            rf_muxing: RFMuxing::Jump26,
+            ex_mode: ExMode::UnconditionalBranch,
+        ),
+        _ => InstructionInfo$ ( // TODO
+            regfile_mode: RegfileMode::Nop,
+            rf_muxing: RFMuxing::RsRt,
+            ex_mode: ExMode::Nop,
+        )
+    }
+}
+
+fn decode_special(ins: uint<32>) -> InstructionInfo {
+        InstructionInfo$ ( // TODO
+            regfile_mode: RegfileMode::Nop,
+            rf_muxing: RFMuxing::RsRt,
+            ex_mode: ExMode::Nop,
+        )
+}
+
+fn decode_regimm(ins: uint<32>) -> InstructionInfo {
+        InstructionInfo$ ( // TODO
+            regfile_mode: RegfileMode::Nop,
+            rf_muxing: RFMuxing::RsRt,
+            ex_mode: ExMode::Nop,
+        )
+}

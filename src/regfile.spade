@@ -22,7 +22,7 @@ impl RegId {
     }
 }
 
-pipeline(1) regfile(
+pipeline(0) regfile(
     clk: clock,
     rs: RegId,
     rt: RegId,
@@ -50,7 +50,17 @@ pipeline(1) regfile(
 
         let rs_val = inst read_memory(regs, rs.index());
         let rt_val = inst read_memory(regs, rt.index());
+        (rs_val, rt_val)
+}
 
+pipeline(1) test(
+    clk: clock,
+    rs: RegId,
+    rt: RegId,
+    write: (RegId, uint<64>),
+) -> (uint<64>, uint<64>)
+{
+        let (rs_val, rt_val) = inst(0) regfile(clk, rs, rt, write);
     reg;
         (rs_val, rt_val)
 }

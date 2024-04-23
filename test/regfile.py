@@ -1,4 +1,4 @@
-#top=regfile::regfile
+#top=regfile::test
 
 import cocotb
 from spade import *

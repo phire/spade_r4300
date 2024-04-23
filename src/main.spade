@@ -1,61 +1,7 @@
-use lib::regfile::regfile;
-use lib::regfile::RegId;
+
 use lib::icache::instruction_cache;
-use lib::icache::icache_read;
-use lib::icache::ICache;
-
-enum PipelineResult {
-    Ok,
-}
-
-
-fn rs(ins: uint<32>) -> uint<5> {
-    trunc(ins >> 6)
-}
-
-fn rt(ins: uint<32>) -> uint<5> {
-    trunc(ins >> 11)
-}
-
-fn rd(ins: uint<32>) -> uint<5> {
-    trunc(ins >> 16)
-}
-
-
-pipeline(5) r4200_pipeline(clk: clock, icache: ICache) -> PipelineResult {
-        'instruction_cache
-
-        let pc = stage(execute).next_pc;
-        let (ins, cache_tag, valid) = inst(1) icache_read(clk, icache, pc);
-        // todo: micro-TLB read
-
-
-    reg;
-        'register_file
-        let thispc = pc;
-
-        let rs = RegId::Integer( rs(ins) );
-        let rt = RegId::Integer( rt(ins) );
-        let write = stage(writeback).regfile_write;
-
-        let (rs_val, rt_val) = inst(1) regfile$(clk, rs, rt, write);
-        let dest = RegId::Integer( rd(ins) );
-
-    reg;
-        'execute
-        let next_pc = trunc(thispc + 4);
-        let val = trunc(rs_val + rt_val);
-
-    reg;
-        'data_cache
-
-    reg;
-        'writeback
-        let regfile_write = (dest, val);
-
-    reg;
-        PipelineResult::Ok
-}
+use lib::pipe::r4200_pipeline;
+use lib::pipe::PipelineResult;
 
 entity cpu(clk: clock, icache_write: Option<(uint<11>, uint<20>, uint<64>)>) -> PipelineResult {
     let icache = inst(1) instruction_cache(clk, icache_write);
