@@ -9,6 +9,8 @@ use lib::instructions::decode;
 use lib::instructions::RegfileMode;
 use lib::instructions::RFMuxing;
 use lib::instructions::ExMode;
+use lib::instructions::Compare;
+use lib::instructions::Trap;
 
 use std::ports::new_mut_wire;
 use std::ports::read_mut_wire;
@@ -35,7 +37,8 @@ fn adder(mode: ExMode, x: int<64>, y: int<64>) -> int<64> {
         let op_x = int_to_uint(x);
         let y = int_to_uint(y);
         let (op_y, carry_in) = match mode {
-            ExMode::Sub => (~y, 1),
+            ExMode::Sub32 => (~y, 1),
+            ExMode::Sub64 => (~y, 1),
             ExMode::SetLess => (~y, 1),
             ExMode::SetLessUnsigned => (~y, 1),
             _ => (y, 0),
@@ -43,6 +46,7 @@ fn adder(mode: ExMode, x: int<64>, y: int<64>) -> int<64> {
 
         let adder_out: uint<66> = (op_x + op_y + carry_in);
         let out64: int<64> = uint_to_int(trunc(adder_out));
+        let out32: int<32> = trunc(out64);
 
         let carry_out: bool = (adder_out >> 64) == 1;
         let sign_out: bool = (out64 >> 63) == 1;
@@ -50,6 +54,8 @@ fn adder(mode: ExMode, x: int<64>, y: int<64>) -> int<64> {
         match mode {
                 ExMode::SetLess => if carry_out && !sign_out { 0 } else { 1 },
                 ExMode::SetLessUnsigned => if carry_out { 0 } else { 1 },
+                ExMode::Add32 => sext(out32),
+                ExMode::Sub32 => sext(out32),
                 _ => out64,
         }
 }
@@ -74,13 +80,14 @@ fn shifter(mode: ExMode, shift_mux: int<64>, add_result: int<64>) -> int<64>
         let byte_shift = (add_result & 0x7) << 3;
 
         let shift_result: int<64> = match mode {
-            ExMode::ShiftLeft         => trunc(shift_mux << shift5),
-            ExMode::ShiftLeft64       => trunc(shift_mux << shift6),
-            ExMode::ShiftRight        => trunc(shift_mux >> shift5),
-            ExMode::ShiftRight64      => trunc(shift_mux >> shift6),
+            ExMode::ShiftLeft         => shift_mux << shift5,
+            ExMode::ShiftLeft64       => shift_mux << shift6,
+            ExMode::ShiftRight        => shift_mux >> shift5,
+            ExMode::ShiftRight64      => shift_mux >> shift6,
             ExMode::ShiftRightArith   => shift_mux >>> shift5,
             ExMode::ShiftRightArith64 => shift_mux >>> shift6,
-            ExMode::Memory => {
+            ExMode::InsertUpper       => shift_mux << 16,
+            ExMode::Memory(size) => {
                 // The Shifter is also used to rotate the data for stores that aren't
                 // 64-bit aligned.
                 // The adder was calculating the virtual address, so we can take the
@@ -126,6 +133,7 @@ pipeline(5) r4200_pipeline(phase2: clock, phase1: clock, rst: bool, icache: ICac
         let imm: int<64> = match inst_info.rf_muxing {
             RFMuxing::RsImmSigned => sext(imm16),
             RFMuxing::RsImmUnsigned => concat(0, imm16),
+            RFMuxing::ImmUpper => sext(imm16),
             RFMuxing::Shift => concat(0, imm_shift),
             RFMuxing::Shift64 => concat(1, imm_shift),
             RFMuxing::Memory => sext(imm16),
@@ -142,6 +150,7 @@ pipeline(5) r4200_pipeline(phase2: clock, phase1: clock, rst: bool, icache: ICac
 
         let (x_mux, y_mux, shift_mux) = match inst_info.rf_muxing {
             RFMuxing::RsRt => (rs_val, rt_val, 0),
+            RFMuxing::ImmUpper => (rs_val, rt_val, imm),
             _ => (rs_val, imm, rt_val),
         };
     reg;
@@ -159,13 +168,28 @@ pipeline(5) r4200_pipeline(phase2: clock, phase1: clock, rst: bool, icache: ICac
         let shift_result = shifter(inst_info.ex_mode, x_mux, add_result);
 
     // LogicOps:
+        let is_zero = x_mux == 0;
+        let is_neg = (x_mux >> 63) == 1;
+
         let logic_result = match inst_info.ex_mode {
             ExMode::And => trunc(x_mux & y_mux),
             ExMode::Or => trunc(x_mux | y_mux),
             ExMode::Xor => trunc(x_mux ^ y_mux),
             ExMode::Nor => trunc(~(x_mux | y_mux)),
+            ExMode::Branch(cmp) => {
+                let cmp_result = match cmp {
+                    Compare::Equal => is_zero,
+                    Compare::NotEqual => !is_zero,
+                    Compare::GreaterThanZero => !is_neg && !is_zero,
+                    Compare::GreaterEqualZero => !is_neg || is_zero,
+                    Compare::LessThanZero => is_neg && !is_zero,
+                    Compare::LessEqualZero => is_neg || is_zero,
+                };
+                if cmp_result { 1 } else { 0 }
+            },
             _ => 0,
         };
+
     // R Mux:
         // Logically it would make more sense to have a single 3-way Result mux later on.
         // But the shifter and logic ops are physically before the adder and multiplier
@@ -182,8 +206,10 @@ pipeline(5) r4200_pipeline(phase2: clock, phase1: clock, rst: bool, icache: ICac
 
     // Result Mux:
         let result_mux = match inst_info.ex_mode {
-            ExMode::Add => add_result,
-            ExMode::Sub => add_result,
+            ExMode::Add32 => add_result,
+            ExMode::Add64 => add_result,
+            ExMode::Sub32 => add_result,
+            ExMode::Sub64 => add_result,
             ExMode::SetLess => add_result,
             ExMode::SetLessUnsigned => add_result,
             _ => r_mux,

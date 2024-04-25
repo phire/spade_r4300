@@ -11,7 +11,7 @@ async def simple_add(dut):
 
     await cocotb.start(Clock(clk, 10, units='ns').start())
     await FallingEdge(clk)
-    s.i.mode = "ExMode::Add"
+    s.i.mode = "ExMode::Add64"
 
     s.i.x = "3"
     s.i.y = "4"
@@ -41,7 +41,7 @@ async def simple_sub(dut):
     await cocotb.start(Clock(clk, 10, units='ns').start())
     await FallingEdge(clk)
 
-    s.i.mode = "ExMode::Sub"
+    s.i.mode = "ExMode::Sub64"
     s.i.x = "3"
     s.i.y = "4"
     await FallingEdge(clk)

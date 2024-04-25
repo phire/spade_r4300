@@ -15,21 +15,43 @@ enum RFMuxing {
     RsImmUnsigned,
     Shift,
     Shift64,
+    ImmUpper,
     Memory,
     Jump26,
+}
+
+enum Compare {
+    Equal,
+    NotEqual,
+    GreaterThanZero,
+    GreaterEqualZero,
+    LessThanZero,
+    LessEqualZero,
+}
+
+enum Trap {
+    None,
+    Carry,
+    SignedCarry,
+    NotCarry,
+    NotSignedCarry,
+    Compare,
 }
 
 enum ExMode {
     Nop,
     UnconditionalBranch,
-    Memory,
+    Branch{cmp: Compare},
+    Compare{cmp: Compare},
+    Memory{size: uint<6>},
 
 // Adder
-    Add,
-    Sub,
+    Add32,
+    Add64,
+    Sub32,
+    Sub64,
     SetLess,
     SetLessUnsigned,
-    // Compares?
 
 // Shifter
     ShiftLeft,
@@ -38,6 +60,7 @@ enum ExMode {
     ShiftLeft64,
     ShiftRight64,
     ShiftRightArith64,
+    InsertUpper,
 
 // Logic
     And,
@@ -48,62 +71,395 @@ enum ExMode {
 // Multiplier
     Mul{bits: uint<6>, signed: bool},
     Div{bits: uint<6>, signed: bool},
-
-// Branching
-    BEqual,
-    BNotEqual,
-    BGreater,
-    BGreaterEqual,
-    BSignClear,
 }
 
 struct InstructionInfo {
     regfile_mode: RegfileMode,
     rf_muxing: RFMuxing,
     ex_mode: ExMode,
+    exception: Trap,
 }
 
-fn branch(mode: ExMode) -> InstructionInfo {
+fn compare(mode: Compare) -> InstructionInfo {
+    InstructionInfo$ (
+        regfile_mode: RegfileMode::ReadInterger,
+        rf_muxing: RFMuxing::RsRt,
+        ex_mode: ExMode::Compare(mode),
+        exception: Trap::None,
+    )
+}
+
+fn branch(mode: Compare) -> InstructionInfo {
+    InstructionInfo$ (
+        regfile_mode: RegfileMode::ReadInterger,
+        rf_muxing: RFMuxing::RsRt,
+        ex_mode: ExMode::Branch(mode),
+        exception: Trap::None,
+    )
+}
+
+fn and_link(info: InstructionInfo) -> InstructionInfo {
+    InstructionInfo$ (
+        regfile_mode: info.regfile_mode,
+        rf_muxing: info.rf_muxing,
+        ex_mode: info.ex_mode,
+        exception: Trap::None,
+    )
+}
+
+fn likely(info: InstructionInfo) -> InstructionInfo {
+    InstructionInfo$ (
+        regfile_mode: info.regfile_mode,
+        rf_muxing: info.rf_muxing,
+        ex_mode: info.ex_mode,
+        exception: Trap::None,
+    )
+}
+
+fn logic(mode: ExMode) -> InstructionInfo {
+    InstructionInfo$ (
+        regfile_mode: RegfileMode::ReadInterger,
+        rf_muxing: RFMuxing::RsImmUnsigned,
+        ex_mode: mode,
+        exception: Trap::None,
+    )
+}
+
+fn adder(mode: ExMode) -> InstructionInfo {
     InstructionInfo$ (
         regfile_mode: RegfileMode::ReadInterger,
         rf_muxing: RFMuxing::RsRt,
         ex_mode: mode,
+        exception: Trap::None,
+    )
+}
+
+fn shift(mode: ExMode) -> InstructionInfo {
+    InstructionInfo$ (
+        regfile_mode: RegfileMode::ReadInterger,
+        rf_muxing: RFMuxing::Shift,
+        ex_mode: mode,
+        exception: Trap::None,
+    )
+}
+
+fn imm(info: InstructionInfo) -> InstructionInfo {
+    InstructionInfo$ (
+        regfile_mode: info.regfile_mode,
+        rf_muxing: RFMuxing::RsImmSigned,
+        ex_mode: info.ex_mode,
+        exception: info.exception,
+    )
+}
+
+fn uimm(info: InstructionInfo) -> InstructionInfo {
+    InstructionInfo$ (
+        regfile_mode: info.regfile_mode,
+        rf_muxing: RFMuxing::RsImmUnsigned,
+        ex_mode: info.ex_mode,
+        exception: info.exception,
+    )
+}
+
+fn trap(t: Trap, info: InstructionInfo) -> InstructionInfo {
+    InstructionInfo$ (
+        regfile_mode: info.regfile_mode,
+        rf_muxing: info.rf_muxing,
+        ex_mode: info.ex_mode,
+        exception: t,
+    )
+}
+
+fn store(size: uint<6>) -> InstructionInfo {
+    InstructionInfo$ (
+        regfile_mode: RegfileMode::ReadInterger,
+        rf_muxing: RFMuxing::Memory,
+        ex_mode: ExMode::Memory(size),
+        exception: Trap::None,
+    )
+}
+
+fn load(size: uint<6>) -> InstructionInfo {
+    InstructionInfo$ (
+        regfile_mode: RegfileMode::ReadInterger,
+        rf_muxing: RFMuxing::Memory,
+        ex_mode: ExMode::Memory(size),
+        exception: Trap::None,
+    )
+}
+
+fn linked(info: InstructionInfo) -> InstructionInfo {
+    InstructionInfo$ (
+        regfile_mode: info.regfile_mode,
+        rf_muxing: info.rf_muxing,
+        ex_mode: info.ex_mode,
+        exception: Trap::None,
+    )
+}
+
+fn conditional(info: InstructionInfo) -> InstructionInfo {
+    InstructionInfo$ (
+        regfile_mode: info.regfile_mode,
+        rf_muxing: info.rf_muxing,
+        ex_mode: info.ex_mode,
+        exception: Trap::None,
     )
 }
 
 
+fn only_zero(val: uint<6>, info: InstructionInfo) -> InstructionInfo {
+    if val == 0 { info } else { exception() }
+}
+
 fn decode(ins: uint<32>) -> InstructionInfo {
     let opcode: uint<6> = trunc(ins >> 26);
+    let rt: uint<6> = trunc(ins >> 16);
 
     match opcode {
         0b000000 => decode_special(ins),
         0b000001 => decode_regimm(ins),
-        0b000010 => InstructionInfo$( // J
+        0b000010 => InstructionInfo$ ( // J
             regfile_mode: RegfileMode::ReadInterger,
             rf_muxing: RFMuxing::Jump26,
             ex_mode: ExMode::UnconditionalBranch,
+            exception: Trap::None,
         ),
-        0b000100 => branch(ExMode::BEqual), // BEQ
-        _ => InstructionInfo$ ( // TODO
-            regfile_mode: RegfileMode::Nop,
-            rf_muxing: RFMuxing::RsRt,
-            ex_mode: ExMode::Nop,
-        )
+        0b000011 => InstructionInfo$ ( // JAL
+            regfile_mode: RegfileMode::ReadInterger,
+            rf_muxing: RFMuxing::Jump26,
+            ex_mode: ExMode::UnconditionalBranch,
+            exception: Trap::None,
+        ),
+        0b000100 => branch(Compare::Equal), // BEQ
+        0b000101 => branch(Compare::NotEqual), // BNE
+        0b000110 => only_zero(rt, branch(Compare::LessEqualZero)), // BLEZ
+        0b000111 => only_zero(rt, branch(Compare::GreaterThanZero)), // BGTZ
+        // 1
+        0b001000 => trap(Trap::SignedCarry, imm(adder(ExMode::Add32))), // ADDI
+        0b001001 => imm(adder(ExMode::Add32)), // ADDIU
+        0b001010 => imm(adder(ExMode::SetLess)), // SLTI
+        0b001011 => imm(adder(ExMode::SetLessUnsigned)), // SLTIU
+        0b001100 => uimm(logic(ExMode::And)), // ANDI
+        0b001101 => uimm(logic(ExMode::Or)), // ORI
+        0b001110 => uimm(logic(ExMode::Xor)), // XORI
+        0b001111 => // LUI
+            InstructionInfo$ (
+                regfile_mode: RegfileMode::Nop,
+                rf_muxing: RFMuxing::RsImmSigned,
+                ex_mode: ExMode::InsertUpper,
+                exception: Trap::None,
+            ),
+
+        // 2
+        0b010000 => unimplemented(), // COP0
+        0b010001 => unimplemented(), // COP1
+        0b010010 => unimplemented(), // COP2
+        0b010011 => exception(),
+        0b010100 => unimplemented(), // BEQL
+        0b010101 => unimplemented(), // BNEL
+        0b010110 => unimplemented(), // BLEZL
+        0b010111 => unimplemented(), // BGTZL
+
+        // 3
+        0b011000 => trap(Trap::SignedCarry, imm(adder(ExMode::Add32))), // DADDI
+        0b011001 => imm(adder(ExMode::Add32)), // DADDIU
+        0b011010 => unimplemented(),// LDL
+        0b011011 => unimplemented(),// LDR
+        0b011100 => exception(),
+        0b011101 => exception(),
+        0b011110 => exception(),
+        0b011111 => exception(),
+
+        // 4
+        0b100000 => load(1), // LB
+        0b100001 => load(2), // LH
+        0b100010 => unimplemented(), // LWL
+        0b100011 => load(4), // LW
+        0b100100 => load(1), // LBU
+        0b100101 => load(2), // LHU
+        0b100110 => unimplemented(), // LWR
+        0b100111 => load(4), // LWU
+
+        // 5
+        0b101000 => store(1), // SB
+        0b101001 => store(2), // SH
+        0b101010 => unimplemented(), // SWL
+        0b101011 => store(4), // SW
+        0b101100 => unimplemented(), // SDL
+        0b101101 => unimplemented(), // SDR
+        0b101110 => unimplemented(), // SWR
+        0b101111 => unimplemented(), // CACHE
+
+        // 6
+        0b110000 => linked(load(4)), // LL
+        0b110001 => unimplemented(), // LWC1
+        0b110010 => unimplemented(), // COP2
+        0b110011 => exception(),
+        0b110100 => linked(load(8)), // LLD
+        0b110101 => unimplemented(), // LDC1
+        0b110110 => unimplemented(), // COP2
+        0b110111 => load(8), // LD
+
+        // 7
+        0b111000 => conditional(store(4)), // SC
+        0b111001 => unimplemented(), // SWC1
+        0b111010 => unimplemented(), // COP2
+        0b111011 => exception(),
+        0b111100 => conditional(store(8)), // SCD
+        0b111101 => unimplemented(), // SDC1
+        0b111110 => unimplemented(), // COP2
+        0b111111 => store(8),
     }
 }
 
 fn decode_special(ins: uint<32>) -> InstructionInfo {
-        InstructionInfo$ ( // TODO
+    let special: uint<6> = trunc(ins);
+
+    match special {
+        // 0
+        0b000000 => imm(shift(ExMode::ShiftLeft)), // SLL
+        0b000001 => exception(),
+        0b000010 => imm(shift(ExMode::ShiftRight)), // SRL
+        0b000011 => imm(shift(ExMode::ShiftRightArith)), // SRA
+        0b000100 => shift(ExMode::ShiftLeft), // SLLV
+        0b000001 => exception(),
+        0b000110 => shift(ExMode::ShiftRight), // SRLV
+        0b000111 => shift(ExMode::ShiftRightArith), // SRAV
+
+        // 1
+        0b001000 => InstructionInfo$ ( // JR
+            regfile_mode: RegfileMode::ReadInterger,
+            rf_muxing: RFMuxing::RsRt,
+            ex_mode: ExMode::UnconditionalBranch,
+            exception: Trap::None,
+        ),
+        0b001001 => InstructionInfo$ ( // JALR
+            regfile_mode: RegfileMode::ReadInterger,
+            rf_muxing: RFMuxing::RsRt,
+            ex_mode: ExMode::UnconditionalBranch,
+            exception: Trap::None,
+        ),
+        0b001010 => exception(),
+        0b001011 => exception(),
+        0b001100 => unimplemented(), // SYSCALL
+        0b001101 => unimplemented(), // BREAK
+        0b001111 => InstructionInfo$ ( // SYNC
             regfile_mode: RegfileMode::Nop,
             rf_muxing: RFMuxing::RsRt,
             ex_mode: ExMode::Nop,
-        )
+            exception: Trap::None,
+        ),
+
+        // 2
+        0b010000 => unimplemented(), // MFHI
+        0b010001 => unimplemented(), // MTHI
+        0b010010 => unimplemented(), // MFLO
+        0b010011 => unimplemented(), // MTLO
+        0b010100 => shift(ExMode::ShiftLeft64), // DSLLV
+        0b010101 => exception(),
+        0b010110 => shift(ExMode::ShiftRight64), // DSRLV
+        0b010111 => shift(ExMode::ShiftRightArith64), // DSRAV
+
+        // 3
+        0b011000 => unimplemented(), // MULT
+        0b011001 => unimplemented(), // MULTU
+        0b011010 => unimplemented(), // DIV
+        0b011011 => unimplemented(), // DIVU
+        0b011100 => unimplemented(), // DMULT
+        0b011101 => unimplemented(), // DMULTU
+        0b011110 => unimplemented(), // DDIV
+        0b011111 => unimplemented(), // DDIVU
+
+        // 4
+        0b100000 => trap(Trap::SignedCarry, adder(ExMode::Add32)), // ADD
+        0b100001 => adder(ExMode::Add32), // ADDU
+        0b100010 => trap(Trap::SignedCarry, adder(ExMode::Sub32)), // SUB
+        0b100011 => adder(ExMode::Sub32), // SUBU
+        0b100100 => logic(ExMode::And), // AND
+        0b100101 => logic(ExMode::Or), // OR
+        0b100110 => logic(ExMode::Xor), // XOR
+        0b100111 => logic(ExMode::Nor), // NOR
+
+        // 5
+        0b101000 => exception(),
+        0b101001 => exception(),
+        0b101010 => adder(ExMode::SetLess), // SLT
+        0b101011 => adder(ExMode::SetLessUnsigned), // SLTU
+        0b101100 => trap(Trap::SignedCarry, adder(ExMode::Add64)), // DADD
+        0b101101 => adder(ExMode::Add64), // DADDU
+        0b101110 => trap(Trap::SignedCarry, adder(ExMode::Sub64)), // DSUB
+        0b101111 => adder(ExMode::Sub64), // DSUBU
+
+        // 6
+        0b110000 => trap(Trap::SignedCarry, adder(ExMode::Sub64)), // TGE
+        0b110001 => trap(Trap::Carry, adder(ExMode::Sub64)), // TGEU
+        0b110010 => trap(Trap::NotSignedCarry, adder(ExMode::Sub64)), // TLT
+        0b110011 => trap(Trap::NotCarry, adder(ExMode::Sub64)), // TLTU
+        0b110100 => trap(Trap::Compare, compare(Compare::Equal)), // TEQ
+        0b110101 => exception(),
+        0b110110 => trap(Trap::Compare, compare(Compare::NotEqual)), // TNE
+        0b110111 => exception(),
+
+        // 7
+        0b111000 => shift(ExMode::ShiftLeft64), // DSLL
+        0b111001 => exception(),
+        0b111010 => shift(ExMode::ShiftRight64), // DSRL
+        0b111011 => shift(ExMode::ShiftRightArith64), // DSRA
+        0b111100 => imm(shift(ExMode::ShiftLeft64)), // DSLL32
+        0b111101 => exception(),
+        0b111110 => imm(shift(ExMode::ShiftRight64)), // DSRL32
+        0b111111 => imm(shift(ExMode::ShiftRightArith64)), // DSRA32
+    }
 }
 
 fn decode_regimm(ins: uint<32>) -> InstructionInfo {
-        InstructionInfo$ ( // TODO
-            regfile_mode: RegfileMode::Nop,
-            rf_muxing: RFMuxing::RsRt,
-            ex_mode: ExMode::Nop,
-        )
+    let regimm: uint<5> = trunc(ins >> 16);
+
+    match regimm {
+        // 0
+        0b00000 => branch(Compare::LessThanZero), // BLTZ
+        0b00001 => branch(Compare::GreaterEqualZero), // BGEZ
+        0b00010 => likely(branch(Compare::LessThanZero)), // BLTZL
+        0b00011 => likely(branch(Compare::GreaterEqualZero)), // BGEZL
+        0b00100 => exception(),
+        0b00101 => exception(),
+        0b00110 => exception(),
+        0b00111 => exception(),
+
+        // 1
+        0b01000 => trap(Trap::NotSignedCarry, imm(adder(ExMode::Sub64))), // TGEI
+        0b01001 => trap(Trap::NotCarry, imm(adder(ExMode::Sub64))), // TGEIU
+        0b01010 => trap(Trap::SignedCarry, imm(adder(ExMode::Sub64))), // TLTI
+        0b01011 => trap(Trap::Carry, imm(adder(ExMode::Sub64))), // TLTIU
+        0b01100 => trap(Trap::Compare, imm(compare(Compare::Equal))), // TEQI
+        0b01101 => exception(),
+        0b01110 => trap(Trap::Compare, imm(compare(Compare::NotEqual))), // TNEI
+        0b01111 => exception(),
+
+        // 2
+        0b10000 => and_link(branch(Compare::LessThanZero)), // BLTZAL
+        0b10001 => and_link(branch(Compare::GreaterEqualZero)), // BGEZAL
+        0b10010 => and_link(likely(branch(Compare::LessThanZero))), // BLTZALL
+        0b10011 => and_link(likely(branch(Compare::GreaterEqualZero))), // BGEZALL
+
+        _ => exception(),
+    }
+}
+
+fn exception() -> InstructionInfo {
+    InstructionInfo$ (
+        regfile_mode: RegfileMode::Nop,
+        rf_muxing: RFMuxing::RsRt,
+        ex_mode: ExMode::Nop,
+        exception: Trap::None,
+    )
+}
+
+fn unimplemented() -> InstructionInfo {
+    InstructionInfo$ (
+        regfile_mode: RegfileMode::Nop,
+        rf_muxing: RFMuxing::RsRt,
+        ex_mode: ExMode::Nop,
+        exception: Trap::None,
+    )
 }
