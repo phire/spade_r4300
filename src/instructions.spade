@@ -92,7 +92,7 @@ fn compare(mode: Compare) -> InstructionInfo {
 fn branch(mode: Compare) -> InstructionInfo {
     InstructionInfo$ (
         regfile_mode: RegfileMode::ReadInterger,
-        rf_muxing: RFMuxing::RsRt,
+        rf_muxing: RFMuxing::RsImmSigned,
         ex_mode: ExMode::Branch(mode),
         exception: Trap::None,
     )
@@ -119,7 +119,7 @@ fn likely(info: InstructionInfo) -> InstructionInfo {
 fn logic(mode: ExMode) -> InstructionInfo {
     InstructionInfo$ (
         regfile_mode: RegfileMode::ReadInterger,
-        rf_muxing: RFMuxing::RsImmUnsigned,
+        rf_muxing: RFMuxing::RsRt,
         ex_mode: mode,
         exception: Trap::None,
     )
@@ -207,13 +207,14 @@ fn conditional(info: InstructionInfo) -> InstructionInfo {
 }
 
 
-fn only_zero(val: uint<6>, info: InstructionInfo) -> InstructionInfo {
+fn only_zero<N>(val: uint<N>, info: InstructionInfo) -> InstructionInfo {
     if val == 0 { info } else { exception() }
 }
 
 fn decode(ins: uint<32>) -> InstructionInfo {
     let opcode: uint<6> = trunc(ins >> 26);
-    let rt: uint<6> = trunc(ins >> 16);
+    let rs: uint<5> = trunc(ins >> 21);
+    let rt: uint<5> = trunc(ins >> 16);
 
     match opcode {
         0b000000 => decode_special(ins),
@@ -243,12 +244,12 @@ fn decode(ins: uint<32>) -> InstructionInfo {
         0b001101 => uimm(logic(ExMode::Or)), // ORI
         0b001110 => uimm(logic(ExMode::Xor)), // XORI
         0b001111 => // LUI
-            InstructionInfo$ (
+            only_zero(rs, InstructionInfo$ (
                 regfile_mode: RegfileMode::Nop,
-                rf_muxing: RFMuxing::RsImmSigned,
+                rf_muxing: RFMuxing::ImmUpper,
                 ex_mode: ExMode::InsertUpper,
                 exception: Trap::None,
-            ),
+            )),
 
         // 2
         0b010000 => unimplemented(), // COP0
@@ -314,6 +315,11 @@ fn decode(ins: uint<32>) -> InstructionInfo {
 
 fn decode_special(ins: uint<32>) -> InstructionInfo {
     let special: uint<6> = trunc(ins);
+    let rt: uint<5> = trunc(ins >> 16);
+    let rd: uint<5> = trunc(ins >> 11);
+    let sa: uint<5> = trunc(ins >> 6);
+    let rt_rd_sa: uint<15> = concat(rt, concat(rd, sa));
+    let rt_sa: uint<10> = concat(rt, sa);
 
     match special {
         // 0
@@ -327,18 +333,18 @@ fn decode_special(ins: uint<32>) -> InstructionInfo {
         0b000111 => shift(ExMode::ShiftRightArith), // SRAV
 
         // 1
-        0b001000 => InstructionInfo$ ( // JR
+        0b001000 => only_zero(rt_rd_sa, InstructionInfo$ ( // JR
             regfile_mode: RegfileMode::ReadInterger,
             rf_muxing: RFMuxing::RsRt,
             ex_mode: ExMode::UnconditionalBranch,
             exception: Trap::None,
-        ),
-        0b001001 => InstructionInfo$ ( // JALR
+        )),
+        0b001001 => only_zero(rt_sa, InstructionInfo$ ( // JALR
             regfile_mode: RegfileMode::ReadInterger,
             rf_muxing: RFMuxing::RsRt,
             ex_mode: ExMode::UnconditionalBranch,
             exception: Trap::None,
-        ),
+        )),
         0b001010 => exception(),
         0b001011 => exception(),
         0b001100 => unimplemented(), // SYSCALL

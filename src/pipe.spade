@@ -17,15 +17,15 @@ use std::ports::read_mut_wire;
 
 
 fn rs(ins: uint<32>) -> uint<5> {
-    trunc(ins >> 6)
+    trunc(ins >> 21)
 }
 
 fn rt(ins: uint<32>) -> uint<5> {
-    trunc(ins >> 11)
+    trunc(ins >> 16)
 }
 
 fn rd(ins: uint<32>) -> uint<5> {
-    trunc(ins >> 16)
+    trunc(ins >> 11)
 }
 
 enum PipelineResult {
@@ -119,7 +119,7 @@ pipeline(5) r4200_pipeline(phase2: clock, phase1: clock, rst: bool, icache: ICac
         let write = stage(writeback).regfile_write;
 
         let (rs_reg, rt_reg) = inst(0) regfile$(clk: phase2, rs, rt, write);
-        let dest = RegId::Integer( rd(ins) );
+        let rd = RegId::Integer( rd(ins) );
 
     // TODO: bypass muxes
         let rs_val = rs_reg;
@@ -130,18 +130,19 @@ pipeline(5) r4200_pipeline(phase2: clock, phase1: clock, rst: bool, icache: ICac
         let imm26: int<28> = uint_to_int(trunc(ins << 2));
         let imm_shift: int<5> = uint_to_int(trunc(ins >> 6));
 
-        let imm: int<64> = match inst_info.rf_muxing {
-            RFMuxing::RsImmSigned => sext(imm16),
-            RFMuxing::RsImmUnsigned => concat(0, imm16),
-            RFMuxing::ImmUpper => sext(imm16),
-            RFMuxing::Shift => concat(0, imm_shift),
-            RFMuxing::Shift64 => concat(1, imm_shift),
-            RFMuxing::Memory => sext(imm16),
+        let (imm, dest) = match inst_info.rf_muxing {
+            RFMuxing::RsImmSigned => (sext(imm16), rt),
+            RFMuxing::RsImmUnsigned => (concat(0, imm16), rt),
+            RFMuxing::ImmUpper => (sext(imm16), rt),
+            RFMuxing::Shift => (concat(0, imm_shift), rd),
+            RFMuxing::Shift64 => (concat(1, imm_shift), rd),
+            RFMuxing::Memory => (sext(imm16), rt),
             RFMuxing::Jump26 => {
                 let upper_bits: int<36> = uint_to_int(trunc(pc >> 28));
-                concat(upper_bits, imm26)
+                (concat(upper_bits, imm26), RegId::Integer(0))
             },
-            _ => 0,
+
+            _ => (0, rd),
         };
 
         // The diagrams kind of imply that there are separate paths for logic operations,
@@ -155,17 +156,6 @@ pipeline(5) r4200_pipeline(phase2: clock, phase1: clock, rst: bool, icache: ICac
         };
     reg;
         'execute // EX
-
-        let thispc = stage(instruction_cache).pc;
-        let reset_vector = 0xffffffff_bfc00000;
-        let nextpc = if rst { reset_vector } else { trunc(thispc + 4)};
-
-    // 64-bit Carry-Propagate adder:
-        let add_result = adder(inst_info.ex_mode, x_mux, y_mux);
-        let data_virtual_address = add_result;
-
-    // Shifter:
-        let shift_result = shifter(inst_info.ex_mode, x_mux, add_result);
 
     // LogicOps:
         let is_zero = x_mux == 0;
@@ -189,6 +179,30 @@ pipeline(5) r4200_pipeline(phase2: clock, phase1: clock, rst: bool, icache: ICac
             },
             _ => 0,
         };
+
+    // Instruction Adder:
+        let thispc = stage(instruction_cache).pc;
+        let reset_vector = 0xffffffff_bfc00000;
+
+        let nextpc = if rst {
+            reset_vector
+        } else {
+            match inst_info.ex_mode {
+                ExMode::Branch(_) => trunc(thispc +
+                    if logic_result == 0 { 4 } else { int_to_uint(y_mux << 2) }
+                ),
+                ExMode::UnconditionalBranch => int_to_uint(x_mux),
+                _ => trunc(thispc + 4),
+            }
+        };
+
+    // 64-bit Carry-Propagate adder:
+        let add_result = adder(inst_info.ex_mode, x_mux, y_mux);
+        let data_virtual_address = add_result;
+
+    // Shifter:
+        let shift_result = shifter(inst_info.ex_mode, shift_mux, add_result);
+
 
     // R Mux:
         // Logically it would make more sense to have a single 3-way Result mux later on.
@@ -237,7 +251,7 @@ pipeline(5) r4200_pipeline(phase2: clock, phase1: clock, rst: bool, icache: ICac
         let regfile_write = (dest, result_mux);
 
     reg;
-        PipelineResult::Ok(stage(execute).nextpc)
+        PipelineResult::Ok(stage(instruction_cache).pc)
 }
 
 pipeline(1) test_adder(clk: clock, mode: ExMode, x: uint<64>, y: uint<64>) -> uint<64>
