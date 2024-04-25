@@ -31,8 +31,9 @@ enum PipelineResult {
     NotOk,
 }
 
-fn adder(mode: ExMode, x: uint<64>, y: uint<64>) -> uint<64> {
-        let op_x = x;
+fn adder(mode: ExMode, x: int<64>, y: int<64>) -> int<64> {
+        let op_x = int_to_uint(x);
+        let y = int_to_uint(y);
         let (op_y, carry_in) = match mode {
             ExMode::Sub => (~y, 1),
             ExMode::SetLess => (~y, 1),
@@ -41,7 +42,7 @@ fn adder(mode: ExMode, x: uint<64>, y: uint<64>) -> uint<64> {
         };
 
         let adder_out: uint<66> = (op_x + op_y + carry_in);
-        let out64: uint<64> = trunc(adder_out);
+        let out64: int<64> = uint_to_int(trunc(adder_out));
 
         let carry_out: bool = (adder_out >> 64) == 1;
         let sign_out: bool = (out64 >> 63) == 1;
@@ -49,11 +50,12 @@ fn adder(mode: ExMode, x: uint<64>, y: uint<64>) -> uint<64> {
         match mode {
                 ExMode::SetLess => if carry_out && !sign_out { 0 } else { 1 },
                 ExMode::SetLessUnsigned => if carry_out { 0 } else { 1 },
-                _ => trunc(adder_out),
+                _ => out64,
         }
 }
 
-fn shifter(mode: ExMode, shift_mux: uint<64>, add_result: uint<64>) -> uint<64> {
+fn shifter(mode: ExMode, shift_mux: int<64>, add_result: int<64>) -> int<64>
+{
     // Shifter:
         // The bottom 3, 5 or 6 bits of the adder are used as the shift amount.
         // Because this shifter is used to align the data for memory store operations,
@@ -71,15 +73,13 @@ fn shifter(mode: ExMode, shift_mux: uint<64>, add_result: uint<64>) -> uint<64> 
         let shift6 = add_result & 0x3f;
         let byte_shift = (add_result & 0x7) << 3;
 
-        let shift_result: uint<64> = match mode {
+        let shift_result: int<64> = match mode {
             ExMode::ShiftLeft         => trunc(shift_mux << shift5),
             ExMode::ShiftLeft64       => trunc(shift_mux << shift6),
             ExMode::ShiftRight        => trunc(shift_mux >> shift5),
             ExMode::ShiftRight64      => trunc(shift_mux >> shift6),
-            ExMode::ShiftRightArith   =>
-                int_to_uint(uint_to_int(shift_mux) >>> uint_to_int(shift5)),
-            ExMode::ShiftRightArith64 =>
-                int_to_uint(uint_to_int(shift_mux) >>> uint_to_int(shift6)),
+            ExMode::ShiftRightArith   => shift_mux >>> shift5,
+            ExMode::ShiftRightArith64 => shift_mux >>> shift6,
             ExMode::Memory => {
                 // The Shifter is also used to rotate the data for stores that aren't
                 // 64-bit aligned.
@@ -114,25 +114,24 @@ pipeline(5) r4200_pipeline(phase2: clock, phase1: clock, rst: bool, icache: ICac
         let (rs_reg, rt_reg) = inst(0) regfile$(clk: phase2, rs, rt, write);
         let dest = RegId::Integer( rd(ins) );
 
-
     // TODO: bypass muxes
         let rs_val = rs_reg;
         let rt_val = rt_reg;
 
         let inst_info = decode(ins);
-        let imm16: uint<16> = trunc(ins);
-        let imm26: uint<26> = trunc(ins);
-        let imm_shift: uint<5> = trunc(ins >> 6);
+        let imm16: int<16> = uint_to_int(trunc(ins));
+        let imm26: int<28> = uint_to_int(trunc(ins << 2));
+        let imm_shift: int<5> = uint_to_int(trunc(ins >> 6));
 
-        let imm: uint<64> = match inst_info.rf_muxing {
-            RFMuxing::RsImmSigned => int_to_uint(sext(uint_to_int(imm16))),
-            RFMuxing::RsImmUnsigned => zext(imm16),
-            RFMuxing::Shift => zext(imm_shift),
+        let imm: int<64> = match inst_info.rf_muxing {
+            RFMuxing::RsImmSigned => sext(imm16),
+            RFMuxing::RsImmUnsigned => concat(0, imm16),
+            RFMuxing::Shift => concat(0, imm_shift),
             RFMuxing::Shift64 => concat(1, imm_shift),
-            RFMuxing::Memory => zext(imm16),
+            RFMuxing::Memory => sext(imm16),
             RFMuxing::Jump26 => {
-                let upper_bits = pc & 0xffffffff_f0000000;
-                upper_bits | zext(imm26 << 2)
+                let upper_bits: int<36> = uint_to_int(trunc(pc >> 28));
+                concat(upper_bits, imm26)
             },
             _ => 0,
         };
@@ -149,7 +148,8 @@ pipeline(5) r4200_pipeline(phase2: clock, phase1: clock, rst: bool, icache: ICac
         'execute // EX
 
         let thispc = stage(instruction_cache).pc;
-        let nextpc = if rst { 0xffffffff_bfc00000 } else { trunc(thispc + 4)};
+        let reset_vector = 0xffffffff_bfc00000;
+        let nextpc = if rst { reset_vector } else { trunc(thispc + 4)};
 
     // 64-bit Carry-Propagate adder:
         let add_result = adder(inst_info.ex_mode, x_mux, y_mux);
@@ -198,8 +198,6 @@ pipeline(5) r4200_pipeline(phase2: clock, phase1: clock, rst: bool, icache: ICac
         // todo: pack floating point results
         let packed = result_mux;
 
-
-
     reg;
         'data_cache
 
@@ -216,17 +214,18 @@ pipeline(5) r4200_pipeline(phase2: clock, phase1: clock, rst: bool, icache: ICac
         PipelineResult::Ok(stage(execute).nextpc)
 }
 
-
-pipeline(1) test_adder(clk: clock, mode: ExMode, x: uint<64>, y: uint<64>) -> uint<64> {
-        let add_result = adder(mode, x, y);
+pipeline(1) test_adder(clk: clock, mode: ExMode, x: uint<64>, y: uint<64>) -> uint<64>
+{
+        let add_result = adder(mode, uint_to_int(x), uint_to_int(y));
     reg;
-        add_result
+        int_to_uint(add_result)
 }
 
-pipeline(1) test_shifter(clk: clock, mode: ExMode, shift_mux: uint<64>, add_result: uint<64>) -> uint<64> {
-        let shift_result = shifter(mode, shift_mux, add_result);
+pipeline(1) test_shifter(clk: clock, mode: ExMode, shift_mux: uint<64>, add_result: int<64>) -> uint<64>
+{
+        let shift_result = shifter(mode, uint_to_int(shift_mux), add_result);
     reg;
-        shift_result
+        int_to_uint(shift_result)
 }
 
 struct TestResult {
