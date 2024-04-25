@@ -24,6 +24,70 @@ enum PipelineResult {
     Ok,
 }
 
+fn adder(mode: ExMode, x: uint<64>, y: uint<64>) -> uint<64> {
+        let op_x = x;
+        let (op_y, carry_in) = match mode {
+            ExMode::Sub => (~y, 1),
+            ExMode::SetLess => (~y, 1),
+            ExMode::SetLessUnsigned => (~y, 1),
+            _ => (y, 0),
+        };
+
+        let adder_out: uint<66> = (op_x + op_y + carry_in);
+        let out64: uint<64> = trunc(adder_out);
+
+        let carry_out: bool = (adder_out >> 64) == 1;
+        let sign_out: bool = (out64 >> 63) == 1;
+
+        match mode {
+                ExMode::SetLess => if carry_out && !sign_out { 0 } else { 1 },
+                ExMode::SetLessUnsigned => if carry_out { 0 } else { 1 },
+                _ => trunc(adder_out),
+        }
+}
+
+fn shifter(mode: ExMode, shift_mux: uint<64>, add_result: uint<64>) -> uint<64> {
+    // Shifter:
+        // The bottom 3, 5 or 6 bits of the adder are used as the shift amount.
+        // Because this shifter is used to align the data for memory store operations,
+        // it needs to shift based on the lower bits of the virtual address, which is
+        // being calculated in the adder. So there is a tap to take the lower bits of
+        // the add result before the add even completes.
+
+        // This is a clever MIPS instruction encoding trick. A variable shift
+        // instruction puts the shift amount in RS and requires that the SA field be 0.
+        // A fixed shift instruction puts the shift amount in the SA field and requires
+        // the RS field to be 0 (aka the zero register).
+        // So the RF stage will always configure the adder to do RS + Imm, and
+        // the Imm decoder will be configured to select the SA field.
+        let shift5 = add_result & 0x1f;
+        let shift6 = add_result & 0x3f;
+        let byte_shift = (add_result & 0x7) << 3;
+
+        let shift_result: uint<64> = match mode {
+            ExMode::ShiftLeft         => trunc(shift_mux << shift5),
+            ExMode::ShiftLeft64       => trunc(shift_mux << shift6),
+            ExMode::ShiftRight        => trunc(shift_mux >> shift5),
+            ExMode::ShiftRight64      => trunc(shift_mux >> shift6),
+            ExMode::ShiftRightArith   =>
+                int_to_uint(uint_to_int(shift_mux) >>> uint_to_int(shift5)),
+            ExMode::ShiftRightArith64 =>
+                int_to_uint(uint_to_int(shift_mux) >>> uint_to_int(shift6)),
+            ExMode::Memory => {
+                // The Shifter is also used to rotate the data for stores that aren't
+                // 64-bit aligned.
+                // The adder was calculating the virtual address, so we can take the
+                // lower 3 bits of the result to determine the required byte shift.
+                trunc(shift_mux << byte_shift)
+
+                // TODO: post shift word order swap
+            },
+            _ => 0,
+        };
+
+        shift_result
+}
+
 pipeline(5) r4200_pipeline(clk: clock, icache: ICache) -> PipelineResult {
         'instruction_cache
 
@@ -78,63 +142,12 @@ pipeline(5) r4200_pipeline(clk: clock, icache: ICache) -> PipelineResult {
         'execute
 
     // 64-bit Carry-Propagate adder:
-        let op_x = x_mux;
-        let (op_y, carry_in) = match inst_info.ex_mode {
-            ExMode::Sub => (~y_mux, 1),
-            ExMode::SetLess => (~y_mux, 1),
-            ExMode::SetLessUnsigned => (~y_mux, 1),
-            _ => (y_mux, 0),
-        };
-
-        let adder_out = (x_mux + op_y + carry_in);
-
-        let carry_out: bool = (adder_out >> 64) == 1;
-        let add_result: uint<64> = match inst_info.ex_mode {
-            // TODO: detect signed underflow
-            ExMode::SetLess => if carry_out { 1 } else { 0 },
-            ExMode::SetLessUnsigned => if carry_out { 1 } else { 0 },
-            _ => trunc(adder_out),
-        };
-
-
+        let add_result = adder(inst_info.ex_mode, x_mux, y_mux);
         let data_virtual_address = add_result;
 
     // Shifter:
-        // The bottom 3, 5 or 6 bits of the adder are used as the shift amount.
-        // Because this shifter is used to align the data for memory store operations,
-        // it needs to shift based on the lower bits of the virtual address, which is
-        // being calculated in the adder. So there is a tap to take the lower bits of
-        // the add result before the add even completes.
+        let shift_result = shifter(inst_info.ex_mode, x_mux, add_result);
 
-        // his is a clever MIPS instruction encoding trick. A variable shift
-        // instruction puts the shift amount in RS and requires that the SA field be 0.
-        // A fixed shift instruction puts the shift amount in the SA field and requires
-        // the RS field to be 0 (aka the zero register).
-        // So the RF stage will always configure the adder to do  T
-        let shift5 = add_result & 0x1f;
-        let shift6 = add_result & 0x3f;
-        let byte_shift = (add_result & 0x7) << 3;
-
-        let shift_result: uint<64> = match inst_info.ex_mode {
-            ExMode::ShiftLeft         => trunc(shift_mux << shift5),
-            ExMode::ShiftLeft64       => trunc(shift_mux << shift6),
-            ExMode::ShiftRight        => trunc(shift_mux >> shift5),
-            ExMode::ShiftRight64      => trunc(shift_mux >> shift6),
-            ExMode::ShiftRightArith   =>
-                int_to_uint(uint_to_int(shift_mux) >> uint_to_int(shift5)),
-            ExMode::ShiftRightArith64 =>
-                int_to_uint(uint_to_int(shift_mux) >> uint_to_int(shift6)),
-            ExMode::Memory => {
-                // The Shifter is also used to rotate the data for stores that aren't
-                // 64-bit aligned.
-                // The adder was calculating the virtual address, so we can take the
-                // lower 3 bits of the result to determine the required byte shift.
-                trunc(shift_mux << byte_shift)
-
-                // TODO: post shift word order swap
-            },
-            _ => 0,
-        };
 
     // LogicOps:
 
@@ -173,7 +186,9 @@ pipeline(5) r4200_pipeline(clk: clock, icache: ICache) -> PipelineResult {
         // multiplication and division operations.
         reg(clk) sum_reg = result_mux;
 
-
+    // Packer:
+        // todo: pack floating point results
+        let packed = result_mux;
 
         let next_pc = trunc(thispc + 4);
 
@@ -193,3 +208,15 @@ pipeline(5) r4200_pipeline(clk: clock, icache: ICache) -> PipelineResult {
         PipelineResult::Ok
 }
 
+
+pipeline(1) test_adder(clk: clock, mode: ExMode, x: uint<64>, y: uint<64>) -> uint<64> {
+        let add_result = adder(mode, x, y);
+    reg;
+        add_result
+}
+
+pipeline(1) test_shifter(clk: clock, mode: ExMode, shift_mux: uint<64>, add_result: uint<64>) -> uint<64> {
+        let shift_result = shifter(mode, shift_mux, add_result);
+    reg;
+        shift_result
+}
