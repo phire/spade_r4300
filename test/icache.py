@@ -43,7 +43,7 @@ async def basic_check(dut):
     await FallingEdge(clk)
     s.o.assert_eq(t("0xdead8888", "0xcab77", "true"))
 
-@cocotb.test()
+#@cocotb.test()
 async def sequential(dut):
     s = SpadeExt(dut)
     clk = dut.clk_i

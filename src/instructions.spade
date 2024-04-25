@@ -48,12 +48,27 @@ enum ExMode {
 // Multiplier
     Mul{bits: uint<6>, signed: bool},
     Div{bits: uint<6>, signed: bool},
+
+// Branching
+    BEqual,
+    BNotEqual,
+    BGreater,
+    BGreaterEqual,
+    BSignClear,
 }
 
 struct InstructionInfo {
     regfile_mode: RegfileMode,
     rf_muxing: RFMuxing,
     ex_mode: ExMode,
+}
+
+fn branch(mode: ExMode) -> InstructionInfo {
+    InstructionInfo$ (
+        regfile_mode: RegfileMode::ReadInterger,
+        rf_muxing: RFMuxing::RsRt,
+        ex_mode: mode,
+    )
 }
 
 
@@ -68,6 +83,7 @@ fn decode(ins: uint<32>) -> InstructionInfo {
             rf_muxing: RFMuxing::Jump26,
             ex_mode: ExMode::UnconditionalBranch,
         ),
+        0b000100 => branch(ExMode::BEqual), // BEQ
         _ => InstructionInfo$ ( // TODO
             regfile_mode: RegfileMode::Nop,
             rf_muxing: RFMuxing::RsRt,

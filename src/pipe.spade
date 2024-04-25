@@ -2,11 +2,17 @@ use lib::regfile::regfile;
 use lib::regfile::RegId;
 use lib::icache::icache_read;
 use lib::icache::ICache;
+use lib::icache::Request;
+use lib::icache;
 
 use lib::instructions::decode;
 use lib::instructions::RegfileMode;
 use lib::instructions::RFMuxing;
 use lib::instructions::ExMode;
+
+use std::ports::new_mut_wire;
+use std::ports::read_mut_wire;
+
 
 fn rs(ins: uint<32>) -> uint<5> {
     trunc(ins >> 6)
@@ -21,7 +27,8 @@ fn rd(ins: uint<32>) -> uint<5> {
 }
 
 enum PipelineResult {
-    Ok,
+    Ok{next_pc: uint<64>},
+    NotOk,
 }
 
 fn adder(mode: ExMode, x: uint<64>, y: uint<64>) -> uint<64> {
@@ -88,23 +95,23 @@ fn shifter(mode: ExMode, shift_mux: uint<64>, add_result: uint<64>) -> uint<64> 
         shift_result
 }
 
-pipeline(5) r4200_pipeline(clk: clock, icache: ICache) -> PipelineResult {
-        'instruction_cache
+pipeline(5) r4200_pipeline(phase2: clock, phase1: clock, rst: bool, icache: ICache) -> PipelineResult {
 
-        let pc = stage(execute).next_pc;
-        let (ins, cache_tag, valid) = inst(1) icache_read(clk, icache, pc);
+    reg(phase1) pc  = stage(execute).nextpc;
+        'instruction_cache // IC
+        // Nothing happens in phase1 of the IC stage
+        // It's waiting for the program counter to be calculated during EX phase1
+        let (ins, cache_tag, valid) = inst(1) icache_read(phase1, icache, pc);
         // todo: micro-TLB read
-
 
     reg;
         'register_file
-        let thispc = pc;
 
         let rs = RegId::Integer( rs(ins) );
         let rt = RegId::Integer( rt(ins) );
         let write = stage(writeback).regfile_write;
 
-        let (rs_reg, rt_reg) = inst(0) regfile$(clk, rs, rt, write);
+        let (rs_reg, rt_reg) = inst(0) regfile$(clk: phase2, rs, rt, write);
         let dest = RegId::Integer( rd(ins) );
 
 
@@ -124,8 +131,8 @@ pipeline(5) r4200_pipeline(clk: clock, icache: ICache) -> PipelineResult {
             RFMuxing::Shift64 => concat(1, imm_shift),
             RFMuxing::Memory => zext(imm16),
             RFMuxing::Jump26 => {
-                let upper_bits = thispc & 0xffffffff_fc000000;
-                upper_bits | zext(imm26)
+                let upper_bits = pc & 0xffffffff_f0000000;
+                upper_bits | zext(imm26 << 2)
             },
             _ => 0,
         };
@@ -139,7 +146,10 @@ pipeline(5) r4200_pipeline(clk: clock, icache: ICache) -> PipelineResult {
             _ => (rs_val, imm, rt_val),
         };
     reg;
-        'execute
+        'execute // EX
+
+        let thispc = stage(instruction_cache).pc;
+        let nextpc = if rst { 0xffffffff_bfc00000 } else { trunc(thispc + 4)};
 
     // 64-bit Carry-Propagate adder:
         let add_result = adder(inst_info.ex_mode, x_mux, y_mux);
@@ -148,9 +158,7 @@ pipeline(5) r4200_pipeline(clk: clock, icache: ICache) -> PipelineResult {
     // Shifter:
         let shift_result = shifter(inst_info.ex_mode, x_mux, add_result);
 
-
     // LogicOps:
-
         let logic_result = match inst_info.ex_mode {
             ExMode::And => trunc(x_mux & y_mux),
             ExMode::Or => trunc(x_mux | y_mux),
@@ -184,13 +192,13 @@ pipeline(5) r4200_pipeline(clk: clock, icache: ICache) -> PipelineResult {
     // Sum Reg:
         // The sum reg is used to hold intermediate results of multi-cycle
         // multiplication and division operations.
-        reg(clk) sum_reg = result_mux;
+        reg(phase2) sum_reg = result_mux;
 
     // Packer:
         // todo: pack floating point results
         let packed = result_mux;
 
-        let next_pc = trunc(thispc + 4);
+
 
     reg;
         'data_cache
@@ -205,7 +213,7 @@ pipeline(5) r4200_pipeline(clk: clock, icache: ICache) -> PipelineResult {
         let regfile_write = (dest, result_mux);
 
     reg;
-        PipelineResult::Ok
+        PipelineResult::Ok(stage(execute).nextpc)
 }
 
 
@@ -219,4 +227,41 @@ pipeline(1) test_shifter(clk: clock, mode: ExMode, shift_mux: uint<64>, add_resu
         let shift_result = shifter(mode, shift_mux, add_result);
     reg;
         shift_result
+}
+
+struct TestResult {
+    next_pc: uint<64>,
+    index: uint<13>,
+}
+
+pipeline(5) test_pipeline(
+    phase1: clock,
+    phase2: clock,
+    rst: bool,
+    ins: uint<32>,
+    tag: uint<20>,
+    valid: bool
+) -> TestResult
+{
+    // Create a fake Instruction Cache
+    let result = icache::Result$(
+        data: ins,
+        tag: tag,
+        valid: valid,
+    );
+    let request = inst new_mut_wire();
+    let icache = ICache$(request, result: &result);
+
+    // instantiate the pipeline
+    let status = inst(5) r4200_pipeline(phase2, phase1, rst, icache);
+
+
+reg * 5;
+    let next_pc = match status {
+        PipelineResult::Ok(next_pc) => next_pc,
+        PipelineResult::NotOk => 0,
+    };
+
+    let Request$( index: index ) = inst read_mut_wire(request);
+    TestResult$(next_pc, index)
 }

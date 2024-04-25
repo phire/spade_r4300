@@ -3,7 +3,7 @@ use lib::icache::instruction_cache;
 use lib::pipe::r4200_pipeline;
 use lib::pipe::PipelineResult;
 
-entity cpu(clk: clock, icache_write: Option<(uint<11>, uint<20>, uint<64>)>) -> PipelineResult {
-    let icache = inst(1) instruction_cache(clk, icache_write);
-    inst(5) r4200_pipeline(clk, icache)
+entity cpu(phase2: clock, phase1: clock, rst: bool, icache_write: Option<(uint<11>, uint<20>, uint<64>)>) -> PipelineResult {
+    let icache = inst(1) instruction_cache(phase1, icache_write);
+    inst(5) r4200_pipeline(phase2, phase1, rst, icache)
 }
