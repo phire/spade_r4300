@@ -132,46 +132,70 @@ pipeline(5) r4200_pipeline(
     dcache: DCache
 ) -> PipelineResult
 {
-
-    reg(phase1) pc  = stage(execute).nextpc;
-        'instruction_cache // IC
+        reg(phase1) pc = stage(EX).nextpc;
+        'IC // Instruction Cache
         // Nothing happens in phase1 of the IC stage
         // It's waiting for the program counter to be calculated during EX phase1
         let (ins, cache_tag, valid) = inst(1) icache_read(phase1, icache, pc);
         // todo: micro-TLB read
 
     reg;
-        'register_file
+        'RF // Register File
 
         let rs = RegId::Integer( rs(ins) );
         let rt = RegId::Integer( rt(ins) );
-        let write = stage(writeback).regfile_write;
+        let write = stage(WB).regfile_write;
 
         let (rs_reg, rt_reg) = inst(0) regfile$(clk: phase2, rs, rt, write);
         let rd = RegId::Integer( rd(ins) );
 
-    // TODO: bypass muxes
-        let rs_val = rs_reg;
-        let rt_val = rt_reg;
+        // Bypass muxes
+        let (wb_dest, wb_data) = stage(WB).regfile_write;
+        let _ = stage(EX).dest;
+        let _ = stage(EX).data;
+
+        let rs_val = if rs.index() == 0 {
+             0
+        } else if stage(EX).dest.index() == rs.index() {
+            stage(EX).data
+        } else if stage(DC).dest.index() == rs.index() {
+            stage(DC).data
+        } else if wb_dest.index() == rs.index() {
+            wb_data
+        } else {
+            rs_reg
+        };
+
+        let rt_val = if rt.index() == 0 {
+            0
+        } else if stage(EX).dest.index() == rt.index() {
+            stage(EX).data
+        } else if stage(DC).dest.index() == rt.index() {
+            stage(DC).data
+        } else if wb_dest.index() == rt.index() {
+            wb_data
+        } else {
+            rt_reg
+        };
 
         let inst_info = decode(ins);
         let imm16: int<16> = uint_to_int(trunc(ins));
         let imm26: int<28> = uint_to_int(trunc(ins << 2));
         let imm_shift: int<5> = uint_to_int(trunc(ins >> 6));
 
-        let (imm, dest) = match inst_info.rf_muxing {
+        let (imm, dest): (int<64>, RegId) = match inst_info.rf_muxing {
+            RFMuxing::RsRt => (0, rt),
             RFMuxing::RsImmSigned => (sext(imm16), rt),
             RFMuxing::RsImmUnsigned => (concat(0, imm16), rt),
             RFMuxing::ImmUpper => (sext(imm16), rt),
             RFMuxing::Shift => (concat(0, imm_shift), rd),
             RFMuxing::Shift64 => (concat(1, imm_shift), rd),
             RFMuxing::Memory => (sext(imm16), rt),
+            RFMuxing::MemoryNoWB => (sext(imm16), RegId::Integer(0)),
             RFMuxing::Jump26 => {
                 let upper_bits: int<36> = uint_to_int(trunc(pc >> 28));
                 (concat(upper_bits, imm26), RegId::Integer(0))
             },
-
-            _ => (0, rd),
         };
 
         // The diagrams kind of imply that there are separate paths for logic operations,
@@ -184,7 +208,7 @@ pipeline(5) r4200_pipeline(
             _ => (rs_val, imm, rt_val),
         };
     reg;
-        'execute // EX
+        'EX // Execute
 
     // LogicOps:
         let is_zero = x_mux == 0;
@@ -210,7 +234,7 @@ pipeline(5) r4200_pipeline(
         };
 
     // Instruction Adder:
-        let thispc = stage(instruction_cache).pc;
+        let thispc = stage(IC).pc;
         let reset_vector = 0xffffffff_bfc00000;
 
         let nextpc = if rst {
@@ -240,7 +264,7 @@ pipeline(5) r4200_pipeline(
 
         let r_mux = match inst_info.ex_mode {
             ExMode::And => logic_result,
-            ExMode::Or =>  logic_result,
+            ExMode::Or  => logic_result,
             ExMode::Xor => logic_result,
             ExMode::Nor => logic_result,
             _ => shift_result,
@@ -264,22 +288,21 @@ pipeline(5) r4200_pipeline(
 
     // Packer:
         // todo: pack floating point results
-        let data = result_mux;
+        let data: int<64> = result_mux;
 
     reg;
-        'data_cache
+        'DC // Data Cache
         // TODO: Get real tag from TLB
         let expected_tag: uint<20> = trunc(data_virtual_address >> 12);
         let index = match inst_info.mem_mode {
             MemMode::Nop => Option::None,
-            MemMode::Discard => Option::None,
             _ => Option::Some(trunc(data_virtual_address >> 3)),
         };
 
         let dcache_access = inst(1) dcache_access(phase2, dcache, index, stage(+1).dcache_write);
 
     reg;
-        'writeback
+        'WB // Writeback
     // Complete any data cache writes
         let write_mask = match inst_info.mem_mode {
             MemMode::Store => Option::Some(mask),
@@ -296,7 +319,6 @@ pipeline(5) r4200_pipeline(
 
         let regfile_write = match inst_info.mem_mode {
             MemMode::Nop => (dest, result_mux),
-            MemMode::Discard => (RegId::Integer(0), 0),
             MemMode::Load => (dest, aligned_load),
             MemMode::Store => (RegId::Integer(0), 0),
             MemMode::Cache => (RegId::Integer(0), 0),
@@ -305,7 +327,7 @@ pipeline(5) r4200_pipeline(
         };
 
     reg;
-        PipelineResult::Ok(stage(instruction_cache).pc)
+        PipelineResult::Ok(stage(IC).pc)
 }
 
 pipeline(1) test_adder(clk: clock, mode: ExMode, x: uint<64>, y: uint<64>) -> uint<64>

@@ -13,10 +13,11 @@ enum RFMuxing {
     RsRt,
     RsImmSigned,
     RsImmUnsigned,
+    ImmUpper,
     Shift,
     Shift64,
-    ImmUpper,
     Memory,
+    MemoryNoWB,
     Jump26,
 }
 
@@ -76,7 +77,6 @@ enum ExMode {
 
 enum MemMode {
     Nop,
-    Discard,
     Load,
     Store,
     Cache,
@@ -195,7 +195,7 @@ fn trap(t: Trap, info: InstructionInfo) -> InstructionInfo {
 fn store(size: uint<4>) -> InstructionInfo {
     InstructionInfo$ (
         regfile_mode: RegfileMode::ReadInterger,
-        rf_muxing: RFMuxing::Memory,
+        rf_muxing: RFMuxing::MemoryNoWB,
         ex_mode: ExMode::Memory(size),
         exception: Trap::None,
         mem_mode: MemMode::Store,
@@ -225,7 +225,7 @@ fn linked(info: InstructionInfo) -> InstructionInfo {
 fn conditional(info: InstructionInfo) -> InstructionInfo {
     InstructionInfo$ (
         regfile_mode: info.regfile_mode,
-        rf_muxing: info.rf_muxing,
+        rf_muxing: RFMuxing::Memory,
         ex_mode: info.ex_mode,
         exception: Trap::None,
         mem_mode: MemMode::ConditionalStore,

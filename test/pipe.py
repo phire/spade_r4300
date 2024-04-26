@@ -167,13 +167,7 @@ async def long_jump(dut):
 
     prog = [
         itype(0b001111, 0, 15, 0x00cc), # lui $r15, 0x00cc
-        nop(2),
-        nop(3),
-        nop(4),
         itype(0b001101, 15, 15, 0xbba0), # ori $r15, $r15, 0x00cc
-        nop(6),
-        nop(7),
-        nop(8),
         rtype(0, 15, 0, 0, 0, 0b001000), # jr $r15
         nop(10),
     ]
@@ -224,13 +218,7 @@ async def store_word(dut):
 
     prog = [
         lui(7, 0xdead),
-        nop(),
-        nop(),
-        nop(),
         ori(7, 7, 0xbeef),
-        nop(),
-        nop(),
-        nop(),
         itype(0b101011, 0, 7, 0x0044), # sw $r7, 0x44($zero)
         itype(0b101011, 0, 7, 0x0268), # sw $r7, 0x268($zero)
         nop(),
@@ -261,13 +249,7 @@ async def store_byte(dut):
 
     prog = [
         lui(7, 0xdead),
-        nop(),
-        nop(),
-        nop(),
         ori(7, 7, 0xbeef),
-        nop(),
-        nop(),
-        nop(),
         itype(0b101000, 0, 7, 0x50), # sb $r7, 0x50($zero)
         itype(0b101000, 0, 7, 0x51), # sb $r7, 0x51($zero)
         itype(0b101000, 0, 7, 0x52), # sb $r7, 0x52($zero)
@@ -301,9 +283,8 @@ async def load_word(dut):
         itype(0b100011, 0, 3, 0x0030), # lw $r3, 0x30($zero)
         nop(),
         nop(),
-        nop(),
         # and store it back
-        itype(0b101011, 0, 3, 0x0074), # sw $r3, 0x70($zero)
+        itype(0b101011, 0, 3, 0x0074), # sw $r3, 0x74($zero)
         nop(),
         nop(),
     ]
@@ -318,3 +299,11 @@ async def load_word(dut):
     assert addr == 0x70
     assert mask == 0x00000000ffffffff
     assert data & mask == 0x00000000fccffccf
+
+@cocotb.test()
+async def bypassing(dut):
+    p = Pipeline(dut)
+    await p.start()
+
+    assert False, "TODO: implement test for bypass logic"
+
