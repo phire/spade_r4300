@@ -77,6 +77,7 @@ class Pipeline:
         await self.clock()
         await self.clock()
         self.i.rst = "false"
+        await self.clock()
 
     async def halfclock(self):
         await FallingEdge(self.phase1)
@@ -126,7 +127,6 @@ async def test_pc(dut):
     p = Pipeline(dut)
     await p.start()
     p.set_inst(0)
-    await p.clock()
 
     # reset vector
     pc = 0xffffffffbfc00000
@@ -143,7 +143,6 @@ async def test_pc(dut):
 async def loop(dut):
     p = Pipeline(dut)
     await p.start()
-    await p.clock()
 
     prog = [
         nop(),
@@ -165,7 +164,6 @@ async def loop(dut):
 async def long_jump(dut):
     p = Pipeline(dut)
     await p.start()
-    await p.clock()
 
     prog = [
         itype(0b001111, 0, 15, 0x00cc), # lui $r15, 0x00cc
@@ -188,8 +186,7 @@ async def long_jump(dut):
     if p.next_pc() != 0x00ccbba0:
         raise Exception(f"Expected pc: 0x00ccbba0, found: 0x{p.next_pc():08x}")
 
-async def do_stores(p, prog, dut):
-
+async def do_stores(p, prog, dut, loads=dict()):
     open_row = None
     writes = []
 
@@ -206,7 +203,10 @@ async def do_stores(p, prog, dut):
 
         if index is not None:
             dut._log.info(f"opening row {index:x} (addr: {index << 3:x})")
-            p.i.data = "0"
+            try:
+                p.i.data = hex(loads[index << 3])
+            except:
+                p.i.data = "0x55aa55aa55aa55aa"
             p.i.d_tag = "0"
             p.i.d_valid = "true"
             open_row = p.d_index()
@@ -221,7 +221,6 @@ async def do_stores(p, prog, dut):
 async def store_word(dut):
     p = Pipeline(dut)
     await p.start()
-    await p.clock()
 
     prog = [
         lui(7, 0xdead),
@@ -259,7 +258,6 @@ async def store_word(dut):
 async def store_byte(dut):
     p = Pipeline(dut)
     await p.start()
-    await p.clock()
 
     prog = [
         lui(7, 0xdead),
@@ -292,3 +290,31 @@ async def store_byte(dut):
         assert row << 3 == 0x50
         assert mask == (0xff000000_00000000 >> (i * 8))
         assert (data & mask) == (0xef000000_00000000 >> (i * 8))
+
+@cocotb.test()
+async def load_word(dut):
+    p = Pipeline(dut)
+    await p.start()
+
+    prog = [
+        # load a word
+        itype(0b100011, 0, 3, 0x0030), # lw $r3, 0x30($zero)
+        nop(),
+        nop(),
+        nop(),
+        # and store it back
+        itype(0b101011, 0, 3, 0x0074), # sw $r3, 0x70($zero)
+        nop(),
+        nop(),
+    ]
+
+    writes = await do_stores(p, prog, dut, {0x30: 0x00000000fccffccf})
+
+    assert writes, "No write found"
+
+    row, mask, data = writes[0]
+    addr = row << 3
+    dut._log.info(f"addr: {addr:x}, mask: {mask:x}, data: {data:x}")
+    assert addr == 0x70
+    assert mask == 0x00000000ffffffff
+    assert data & mask == 0x00000000fccffccf

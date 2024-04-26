@@ -34,8 +34,9 @@ impl MemMask {
     }
 
     fn extract(self, data: uint<64>) -> uint<64> {
-        let right_shift = zext(7 - self.size) << 3;
-        let left_shift = zext(self.size - self.align) << 3;
+        let inv_size: uint<64> = 7 - zext(self.size);
+        let left_shift = inv_size << 3;
+        let right_shift = trunc(inv_size - zext(self.align)) << 3;
         (data << left_shift) >>> right_shift
     }
 
