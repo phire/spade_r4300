@@ -3,6 +3,7 @@ use lib::regfile::RegId;
 use lib::icache::icache_read;
 use lib::icache::ICache;
 use lib::icache::Request;
+use lib::icache::Result;
 use lib::icache;
 
 use lib::instructions::decode;
@@ -11,10 +12,17 @@ use lib::instructions::RFMuxing;
 use lib::instructions::ExMode;
 use lib::instructions::Compare;
 use lib::instructions::Trap;
+use lib::instructions::MemMode;
+
+use lib::dcache::dcache_access;
+use lib::dcache::DCache;
+use lib::dcache::DResult;
+use lib::dcache::MemMask;
+use lib::dcache::mem_mask;
+use lib::dcache::null_mask;
 
 use std::ports::new_mut_wire;
 use std::ports::read_mut_wire;
-
 
 fn rs(ins: uint<32>) -> uint<5> {
     trunc(ins >> 21)
@@ -27,6 +35,7 @@ fn rt(ins: uint<32>) -> uint<5> {
 fn rd(ins: uint<32>) -> uint<5> {
     trunc(ins >> 11)
 }
+
 
 enum PipelineResult {
     Ok{next_pc: uint<64>},
@@ -60,7 +69,28 @@ fn adder(mode: ExMode, x: int<64>, y: int<64>) -> int<64> {
         }
 }
 
-fn shifter(mode: ExMode, shift_mux: int<64>, add_result: int<64>) -> int<64>
+fn store_align(size: uint<4>, addr_bits: uint<3>, data: int<64>) -> (int<64>, MemMask)
+{
+    let mask = mem_mask(size, addr_bits);
+
+    // let misalignment = addr_bits & 0x7;
+    // let byte_shift = uint_to_int(concat(0, misalignment << 3));
+
+    // The Shifter is also used to rotate the data for stores that aren't
+    // 64-bit aligned.
+    // The adder was calculating the virtual address, so we can take the
+    // lower 3 bits of the result to determine the required byte shift.
+    // let result = data << byte_shift;
+    // let size_shift: uint<8> = zext(8 - size);
+
+    let result = mask.align(int_to_uint(data));
+
+    // TODO: post shift word order swap
+
+    (uint_to_int(result), mask)
+}
+
+fn shifter(mode: ExMode, shift_mux: int<64>, add_result: int<64>) -> (int<64>, MemMask)
 {
     // Shifter:
         // The bottom 3, 5 or 6 bits of the adder are used as the shift amount.
@@ -77,32 +107,31 @@ fn shifter(mode: ExMode, shift_mux: int<64>, add_result: int<64>) -> int<64>
         // the Imm decoder will be configured to select the SA field.
         let shift5 = add_result & 0x1f;
         let shift6 = add_result & 0x3f;
-        let byte_shift = (add_result & 0x7) << 3;
+        let addr_bits = int_to_uint(trunc(add_result & 0x7));
 
-        let shift_result: int<64> = match mode {
-            ExMode::ShiftLeft         => shift_mux << shift5,
-            ExMode::ShiftLeft64       => shift_mux << shift6,
-            ExMode::ShiftRight        => shift_mux >> shift5,
-            ExMode::ShiftRight64      => shift_mux >> shift6,
-            ExMode::ShiftRightArith   => shift_mux >>> shift5,
-            ExMode::ShiftRightArith64 => shift_mux >>> shift6,
-            ExMode::InsertUpper       => shift_mux << 16,
-            ExMode::Memory(size) => {
-                // The Shifter is also used to rotate the data for stores that aren't
-                // 64-bit aligned.
-                // The adder was calculating the virtual address, so we can take the
-                // lower 3 bits of the result to determine the required byte shift.
-                trunc(shift_mux << byte_shift)
-
-                // TODO: post shift word order swap
-            },
-            _ => 0,
+        let (shift_result, mask) = match mode {
+            ExMode::ShiftLeft         => (shift_mux << shift5, null_mask()),
+            ExMode::ShiftLeft64       => (shift_mux << shift6, null_mask()),
+            ExMode::ShiftRight        => (shift_mux >> shift5, null_mask()),
+            ExMode::ShiftRight64      => (shift_mux >> shift6, null_mask()),
+            ExMode::ShiftRightArith   => (shift_mux >>> shift5, null_mask()),
+            ExMode::ShiftRightArith64 => (shift_mux >>> shift6, null_mask()),
+            ExMode::InsertUpper       => (shift_mux << 16, null_mask()),
+            ExMode::Memory(size) => store_align(size, addr_bits, shift_mux),
+            _ => (0, null_mask()),
         };
 
-        shift_result
+        (shift_result, mask)
 }
 
-pipeline(5) r4200_pipeline(phase2: clock, phase1: clock, rst: bool, icache: ICache) -> PipelineResult {
+pipeline(5) r4200_pipeline(
+    phase2: clock,
+    phase1: clock,
+    rst: bool,
+    icache: ICache,
+    dcache: DCache
+) -> PipelineResult
+{
 
     reg(phase1) pc  = stage(execute).nextpc;
         'instruction_cache // IC
@@ -198,11 +227,10 @@ pipeline(5) r4200_pipeline(phase2: clock, phase1: clock, rst: bool, icache: ICac
 
     // 64-bit Carry-Propagate adder:
         let add_result = adder(inst_info.ex_mode, x_mux, y_mux);
-        let data_virtual_address = add_result;
+        let data_virtual_address = int_to_uint(add_result);
 
     // Shifter:
-        let shift_result = shifter(inst_info.ex_mode, shift_mux, add_result);
-
+        let (shift_result, mask) = shifter(inst_info.ex_mode, shift_mux, add_result);
 
     // R Mux:
         // Logically it would make more sense to have a single 3-way Result mux later on.
@@ -236,19 +264,45 @@ pipeline(5) r4200_pipeline(phase2: clock, phase1: clock, rst: bool, icache: ICac
 
     // Packer:
         // todo: pack floating point results
-        let packed = result_mux;
+        let data = result_mux;
 
     reg;
         'data_cache
+        // TODO: Get real tag from TLB
+        let expected_tag: uint<20> = trunc(data_virtual_address >> 12);
+        let index = match inst_info.mem_mode {
+            MemMode::Nop => Option::None,
+            MemMode::Discard => Option::None,
+            _ => Option::Some(trunc(data_virtual_address >> 3)),
+        };
+
+        let dcache_access = inst(1) dcache_access(phase2, dcache, index, stage(+1).dcache_write);
 
     reg;
         'writeback
+    // Complete any data cache writes
+        let write_mask = match inst_info.mem_mode {
+            MemMode::Store => Option::Some(mask),
+            MemMode::ConditionalStore => Option::Some(mask),
+            _ => Option::None,
+        };
+
+        let dcache_write = (data, write_mask);
+
     // Load aligner:
         // The main shifter is used to align data for stores, but for timing
         // requirements, there is a separate shifter to align data from loads.
+        let aligned_load = uint_to_int(mask.extract(dcache_access.data));
 
-
-        let regfile_write = (dest, result_mux);
+        let regfile_write = match inst_info.mem_mode {
+            MemMode::Nop => (dest, result_mux),
+            MemMode::Discard => (RegId::Integer(0), 0),
+            MemMode::Load => (dest, aligned_load),
+            MemMode::Store => (RegId::Integer(0), 0),
+            MemMode::Cache => (RegId::Integer(0), 0),
+            LinkedLoad => (dest, aligned_load),
+            ConditionalStore => (dest, 1), // TODO: check link register
+        };
 
     reg;
         PipelineResult::Ok(stage(instruction_cache).pc)
@@ -263,7 +317,7 @@ pipeline(1) test_adder(clk: clock, mode: ExMode, x: uint<64>, y: uint<64>) -> ui
 
 pipeline(1) test_shifter(clk: clock, mode: ExMode, shift_mux: uint<64>, add_result: int<64>) -> uint<64>
 {
-        let shift_result = shifter(mode, uint_to_int(shift_mux), add_result);
+        let (shift_result, mask) = shifter(mode, uint_to_int(shift_mux), add_result);
     reg;
         int_to_uint(shift_result)
 }
@@ -271,6 +325,10 @@ pipeline(1) test_shifter(clk: clock, mode: ExMode, shift_mux: uint<64>, add_resu
 struct TestResult {
     next_pc: uint<64>,
     index: uint<13>,
+    d_index: Option<uint<12>>,
+    write: uint<64>,
+    write_mask: MemMask,
+    write_en: bool,
 }
 
 pipeline(5) test_pipeline(
@@ -279,7 +337,10 @@ pipeline(5) test_pipeline(
     rst: bool,
     ins: uint<32>,
     tag: uint<20>,
-    valid: bool
+    valid: bool,
+    data: uint<64>,
+    d_tag: uint<20>,
+    d_valid: bool,
 ) -> TestResult
 {
     // Create a fake Instruction Cache
@@ -291,8 +352,21 @@ pipeline(5) test_pipeline(
     let request = inst new_mut_wire();
     let icache = ICache$(request, result: &result);
 
+    // And a fake Data Cache
+    let d_result = DResult$(data: data, tag: d_tag, valid: d_valid);
+    let d_index = inst new_mut_wire();
+    let d_write = inst new_mut_wire();
+    let d_write_mask = inst new_mut_wire();
+
+    let dcache = DCache$(
+        index: d_index,
+        result: &d_result,
+        write: d_write,
+        write_mask: d_write_mask,
+    );
+
     // instantiate the pipeline
-    let status = inst(5) r4200_pipeline(phase2, phase1, rst, icache);
+    let status = inst(5) r4200_pipeline(phase2, phase1, rst, icache, dcache);
 
 
 reg * 5;
@@ -302,5 +376,12 @@ reg * 5;
     };
 
     let Request$( index: index ) = inst read_mut_wire(request);
-    TestResult$(next_pc, index)
+    let write = inst read_mut_wire(d_write);
+    let (write_mask, write_en) = match inst read_mut_wire(d_write_mask) {
+        Option::Some(mask) => (mask, true),
+        Option::None => (null_mask(), false),
+    };
+    let d_index = inst read_mut_wire(d_index);
+
+    TestResult$(next_pc, index, write, write_mask, write_en, d_index)
 }

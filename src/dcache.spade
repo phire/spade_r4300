@@ -1,0 +1,78 @@
+
+
+struct MemMask {
+    size: uint<3>, // 0 indexed
+    align: uint<3>, // alignment within octbyte
+}
+
+impl MemMask {
+    fn mask(self) -> uint<8> {
+        (0b11111111 >> (7 - zext(self.size))) << zext(self.align)
+    }
+
+    fn byte_mask(self) -> uint<64> {
+        let inv_size: uint<64> = 7 - zext(self.size);
+        let right_shift = inv_size << 3;
+        let left_shift = trunc(inv_size - zext(self.align)) << 3;
+
+        (0xffffffffffffffff >> right_shift) << left_shift
+    }
+
+    fn clear(self, dest: uint<64>) -> uint<64> {
+        let mask = self.byte_mask();
+        dest & ~mask
+    }
+
+    fn align(self, data: uint<64>) -> uint<64> {
+        let shift = ((7 - zext(self.size)) - zext(self.align)) << 3;
+        data << shift
+    }
+
+    fn insert(self, dest: uint<64>, data: uint<64>) -> uint<64> {
+        let mask = self.byte_mask();
+        (dest & ~mask) | (self.align(data) & mask)
+    }
+
+    fn extract(self, data: uint<64>) -> uint<64> {
+        let right_shift = zext(7 - self.size) << 3;
+        let left_shift = zext(self.size - self.align) << 3;
+        (data << left_shift) >>> right_shift
+    }
+
+    fn size(self) -> uint<4> {
+        self.size + 1
+    }
+}
+
+
+fn mem_mask<N, M>(size: uint<N>, addr: uint<M>) -> MemMask {
+    MemMask$ (size: trunc(size - 1), align: trunc(addr))
+}
+
+fn null_mask() -> MemMask {
+    MemMask$ (size: 0, align: 0)
+}
+
+struct DResult {
+    data: uint<64>,
+    tag: uint<20>,
+    valid: bool,
+}
+
+struct port DCache {
+    index: &mut Option<uint<12>>,
+    result: &DResult,
+    write: &mut uint<64>,
+    write_mask: &mut Option<MemMask>,
+}
+
+pipeline(1) dcache_access(clk: clock, dcache: DCache, read_index: Option<uint<12>>, write: (int<64>, Option<MemMask>)) -> DResult
+{
+        let (data, write_mask) = write;
+
+        set dcache.index = read_index;
+        set dcache.write = int_to_uint(data);
+        set dcache.write_mask = write_mask;
+    reg;
+        *dcache.result
+}

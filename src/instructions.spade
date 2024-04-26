@@ -31,6 +31,7 @@ enum Compare {
 
 enum Trap {
     None,
+    Always,
     Carry,
     SignedCarry,
     NotCarry,
@@ -43,7 +44,7 @@ enum ExMode {
     UnconditionalBranch,
     Branch{cmp: Compare},
     Compare{cmp: Compare},
-    Memory{size: uint<6>},
+    Memory{size: uint<4>},
 
 // Adder
     Add32,
@@ -73,11 +74,22 @@ enum ExMode {
     Div{bits: uint<6>, signed: bool},
 }
 
+enum MemMode {
+    Nop,
+    Discard,
+    Load,
+    Store,
+    Cache,
+    LinkedLoad,
+    ConditionalStore,
+}
+
 struct InstructionInfo {
     regfile_mode: RegfileMode,
     rf_muxing: RFMuxing,
     ex_mode: ExMode,
     exception: Trap,
+    mem_mode: MemMode,
 }
 
 fn compare(mode: Compare) -> InstructionInfo {
@@ -86,6 +98,7 @@ fn compare(mode: Compare) -> InstructionInfo {
         rf_muxing: RFMuxing::RsRt,
         ex_mode: ExMode::Compare(mode),
         exception: Trap::None,
+        mem_mode: MemMode::Nop,
     )
 }
 
@@ -95,6 +108,7 @@ fn branch(mode: Compare) -> InstructionInfo {
         rf_muxing: RFMuxing::RsImmSigned,
         ex_mode: ExMode::Branch(mode),
         exception: Trap::None,
+        mem_mode: MemMode::Nop,
     )
 }
 
@@ -104,6 +118,7 @@ fn and_link(info: InstructionInfo) -> InstructionInfo {
         rf_muxing: info.rf_muxing,
         ex_mode: info.ex_mode,
         exception: Trap::None,
+        mem_mode: MemMode::Nop,
     )
 }
 
@@ -113,6 +128,7 @@ fn likely(info: InstructionInfo) -> InstructionInfo {
         rf_muxing: info.rf_muxing,
         ex_mode: info.ex_mode,
         exception: Trap::None,
+        mem_mode: info.mem_mode,
     )
 }
 
@@ -122,6 +138,7 @@ fn logic(mode: ExMode) -> InstructionInfo {
         rf_muxing: RFMuxing::RsRt,
         ex_mode: mode,
         exception: Trap::None,
+        mem_mode: MemMode::Nop,
     )
 }
 
@@ -131,6 +148,7 @@ fn adder(mode: ExMode) -> InstructionInfo {
         rf_muxing: RFMuxing::RsRt,
         ex_mode: mode,
         exception: Trap::None,
+        mem_mode: MemMode::Nop,
     )
 }
 
@@ -140,6 +158,7 @@ fn shift(mode: ExMode) -> InstructionInfo {
         rf_muxing: RFMuxing::Shift,
         ex_mode: mode,
         exception: Trap::None,
+        mem_mode: MemMode::Nop,
     )
 }
 
@@ -149,6 +168,7 @@ fn imm(info: InstructionInfo) -> InstructionInfo {
         rf_muxing: RFMuxing::RsImmSigned,
         ex_mode: info.ex_mode,
         exception: info.exception,
+        mem_mode: info.mem_mode,
     )
 }
 
@@ -158,6 +178,7 @@ fn uimm(info: InstructionInfo) -> InstructionInfo {
         rf_muxing: RFMuxing::RsImmUnsigned,
         ex_mode: info.ex_mode,
         exception: info.exception,
+        mem_mode: info.mem_mode,
     )
 }
 
@@ -167,24 +188,27 @@ fn trap(t: Trap, info: InstructionInfo) -> InstructionInfo {
         rf_muxing: info.rf_muxing,
         ex_mode: info.ex_mode,
         exception: t,
+        mem_mode: info.mem_mode,
     )
 }
 
-fn store(size: uint<6>) -> InstructionInfo {
+fn store(size: uint<4>) -> InstructionInfo {
     InstructionInfo$ (
         regfile_mode: RegfileMode::ReadInterger,
         rf_muxing: RFMuxing::Memory,
         ex_mode: ExMode::Memory(size),
         exception: Trap::None,
+        mem_mode: MemMode::Store,
     )
 }
 
-fn load(size: uint<6>) -> InstructionInfo {
+fn load(size: uint<4>) -> InstructionInfo {
     InstructionInfo$ (
         regfile_mode: RegfileMode::ReadInterger,
         rf_muxing: RFMuxing::Memory,
         ex_mode: ExMode::Memory(size),
         exception: Trap::None,
+        mem_mode: MemMode::Load,
     )
 }
 
@@ -194,6 +218,7 @@ fn linked(info: InstructionInfo) -> InstructionInfo {
         rf_muxing: info.rf_muxing,
         ex_mode: info.ex_mode,
         exception: Trap::None,
+        mem_mode: MemMode::LinkedLoad,
     )
 }
 
@@ -203,6 +228,7 @@ fn conditional(info: InstructionInfo) -> InstructionInfo {
         rf_muxing: info.rf_muxing,
         ex_mode: info.ex_mode,
         exception: Trap::None,
+        mem_mode: MemMode::ConditionalStore,
     )
 }
 
@@ -224,12 +250,14 @@ fn decode(ins: uint<32>) -> InstructionInfo {
             rf_muxing: RFMuxing::Jump26,
             ex_mode: ExMode::UnconditionalBranch,
             exception: Trap::None,
+            mem_mode: MemMode::Nop,
         ),
         0b000011 => InstructionInfo$ ( // JAL
             regfile_mode: RegfileMode::ReadInterger,
             rf_muxing: RFMuxing::Jump26,
             ex_mode: ExMode::UnconditionalBranch,
             exception: Trap::None,
+            mem_mode: MemMode::Nop,
         ),
         0b000100 => branch(Compare::Equal), // BEQ
         0b000101 => branch(Compare::NotEqual), // BNE
@@ -249,6 +277,7 @@ fn decode(ins: uint<32>) -> InstructionInfo {
                 rf_muxing: RFMuxing::ImmUpper,
                 ex_mode: ExMode::InsertUpper,
                 exception: Trap::None,
+                mem_mode: MemMode::Nop,
             )),
 
         // 2
@@ -338,12 +367,14 @@ fn decode_special(ins: uint<32>) -> InstructionInfo {
             rf_muxing: RFMuxing::RsRt,
             ex_mode: ExMode::UnconditionalBranch,
             exception: Trap::None,
+            mem_mode: MemMode::Nop,
         )),
         0b001001 => only_zero(rt_sa, InstructionInfo$ ( // JALR
             regfile_mode: RegfileMode::ReadInterger,
             rf_muxing: RFMuxing::RsRt,
             ex_mode: ExMode::UnconditionalBranch,
             exception: Trap::None,
+            mem_mode: MemMode::Nop,
         )),
         0b001010 => exception(),
         0b001011 => exception(),
@@ -354,6 +385,7 @@ fn decode_special(ins: uint<32>) -> InstructionInfo {
             rf_muxing: RFMuxing::RsRt,
             ex_mode: ExMode::Nop,
             exception: Trap::None,
+            mem_mode: MemMode::Nop,
         ),
 
         // 2
@@ -457,7 +489,8 @@ fn exception() -> InstructionInfo {
         regfile_mode: RegfileMode::Nop,
         rf_muxing: RFMuxing::RsRt,
         ex_mode: ExMode::Nop,
-        exception: Trap::None,
+        exception: Trap::Always,
+        mem_mode: MemMode::Nop,
     )
 }
 
@@ -466,6 +499,7 @@ fn unimplemented() -> InstructionInfo {
         regfile_mode: RegfileMode::Nop,
         rf_muxing: RFMuxing::RsRt,
         ex_mode: ExMode::Nop,
-        exception: Trap::None,
+        exception: Trap::Always,
+        mem_mode: MemMode::Nop,
     )
 }
