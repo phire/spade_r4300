@@ -282,7 +282,6 @@ async def load_word(dut):
         # load a word
         itype(0b100011, 0, 3, 0x0030), # lw $r3, 0x30($zero)
         nop(),
-        nop(),
         # and store it back
         itype(0b101011, 0, 3, 0x0074), # sw $r3, 0x74($zero)
         nop(),

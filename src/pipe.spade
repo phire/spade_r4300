@@ -146,24 +146,24 @@ pipeline(5) r4200_pipeline(
         let rt = RegId::Integer( rt(ins) );
         let write = stage(WB).regfile_write;
 
-        let (rs_reg, rt_reg) = inst(0) regfile$(clk: phase2, rs, rt, write);
+        let (rs_read, rt_read) = inst(0) regfile$(clk: phase2, rs, rt, write);
         let rd = RegId::Integer( rd(ins) );
 
         // Bypass muxes
-        let (wb_dest, wb_data) = stage(WB).regfile_write;
         let _ = stage(EX).dest;
         let _ = stage(EX).data;
+        let _ = stage(DC).dc_data;
 
         let rs_val = if rs.index() == 0 {
              0
         } else if stage(EX).dest.index() == rs.index() {
             stage(EX).data
         } else if stage(DC).dest.index() == rs.index() {
-            stage(DC).data
-        } else if wb_dest.index() == rs.index() {
-            wb_data
+            stage(DC).dc_data
+        } else if stage(WB).dest.index() == rs.index() {
+            stage(WB).dc_data
         } else {
-            rs_reg
+            rs_read
         };
 
         let rt_val = if rt.index() == 0 {
@@ -171,11 +171,11 @@ pipeline(5) r4200_pipeline(
         } else if stage(EX).dest.index() == rt.index() {
             stage(EX).data
         } else if stage(DC).dest.index() == rt.index() {
-            stage(DC).data
-        } else if wb_dest.index() == rt.index() {
-            wb_data
+            stage(DC).dc_data
+        } else if stage(WB).dest.index() == rt.index() {
+            stage(WB).dc_data
         } else {
-            rt_reg
+            rt_read
         };
 
         let inst_info = decode(ins);
@@ -200,7 +200,8 @@ pipeline(5) r4200_pipeline(
 
         // The diagrams kind of imply that there are separate paths for logic operations,
         // but I think they actually use x/y again. But the diagrams are trying
-        // to indicate that only certain values can be used, as logic always takes RS on the left and RT or Imm on the right.
+        // to indicate that only certain values can be used, as logic always
+        // takes RS on the left and RT or Imm on the right.
 
         let (x_mux, y_mux, shift_mux) = match inst_info.rf_muxing {
             RFMuxing::RsRt => (rs_val, rt_val, 0),
@@ -253,6 +254,14 @@ pipeline(5) r4200_pipeline(
         let add_result = adder(inst_info.ex_mode, x_mux, y_mux);
         let data_virtual_address = int_to_uint(add_result);
 
+        let index = match inst_info.mem_mode {
+            MemMode::Nop => Option::None,
+            _ => Option::Some(trunc(data_virtual_address >> 3)),
+        };
+
+        // Start the dcache access now
+        let dcache_access = inst(1) dcache_access(phase2, dcache, index, stage(+1).dcache_write);
+
     // Shifter:
         let (shift_result, mask) = shifter(inst_info.ex_mode, shift_mux, add_result);
 
@@ -294,38 +303,32 @@ pipeline(5) r4200_pipeline(
         'DC // Data Cache
         // TODO: Get real tag from TLB
         let expected_tag: uint<20> = trunc(data_virtual_address >> 12);
-        let index = match inst_info.mem_mode {
-            MemMode::Nop => Option::None,
-            _ => Option::Some(trunc(data_virtual_address >> 3)),
-        };
-
-        let dcache_access = inst(1) dcache_access(phase2, dcache, index, stage(+1).dcache_write);
-
-    reg;
-        'WB // Writeback
-    // Complete any data cache writes
-        let write_mask = match inst_info.mem_mode {
-            MemMode::Store => Option::Some(mask),
-            MemMode::ConditionalStore => Option::Some(mask),
-            _ => Option::None,
-        };
-
-        let dcache_write = (data, write_mask);
 
     // Load aligner:
         // The main shifter is used to align data for stores, but for timing
         // requirements, there is a separate shifter to align data from loads.
         let aligned_load = uint_to_int(mask.extract(dcache_access.data));
 
-        let regfile_write = match inst_info.mem_mode {
-            MemMode::Nop => (dest, result_mux),
-            MemMode::Load => (dest, aligned_load),
-            MemMode::Store => (RegId::Integer(0), 0),
-            MemMode::Cache => (RegId::Integer(0), 0),
-            LinkedLoad => (dest, aligned_load),
-            ConditionalStore => (dest, 1), // TODO: check link register
+        let write_mask = match inst_info.mem_mode {
+            MemMode::Store => Option::Some(mask),
+            MemMode::ConditionalStore => Option::Some(mask),
+            _ => Option::None,
+        };
+        let dcache_write = (data, write_mask);
+
+        let dc_data = match inst_info.mem_mode {
+            MemMode::Nop => data,
+            MemMode::Load => aligned_load,
+            MemMode::Store => data,
+            MemMode::Cache => data,
+            LinkedLoad => aligned_load,
+            ConditionalStore => 1,
         };
 
+    reg;
+        'WB // Writeback
+
+        let regfile_write = (dest, dc_data);
     reg;
         PipelineResult::Ok(stage(IC).pc)
 }
