@@ -304,5 +304,30 @@ async def bypassing(dut):
     p = Pipeline(dut)
     await p.start()
 
-    assert False, "TODO: implement test for bypass logic"
+    prog = [
+        lui(8, 0xdead),
+        ori(7, 8, 0xbeef),
+        # these ORI instructions test bypassing on RS
+        ori(1, 7, 0),
+        ori(2, 7, 0),
+        ori(3, 7, 0),
+        ori(4, 7, 0),
+        itype(0b101011, 0, 1, 0x54), # sw $r1, 0x54($zero)
+        itype(0b101011, 0, 2, 0x54), # sw $r2, 0x54($zero)
+        itype(0b101011, 0, 3, 0x54), # sw $r3, 0x54($zero)
+        itype(0b101011, 0, 4, 0x54), # sw $r4, 0x54($zero)
+        ori(9, 8, 0xbeef),
+        # and these stores are bypassing on RT from the ori above
+        itype(0b101011, 0, 9, 0x54), # sw $r7, 0x54($zero)
+        itype(0b101011, 0, 9, 0x54), # sw $r7, 0x54($zero)
+        itype(0b101011, 0, 9, 0x54), # sw $r7, 0x54($zero)
+        itype(0b101011, 0, 9, 0x54), # sw $r7, 0x54($zero)
+        nop(),
+        nop(),
+    ]
 
+    writes = await do_stores(p, prog, dut)
+    for i in range(8):
+        row, mask, data = writes[i]
+        dut._log.info(f"byte: {i}, mask: {mask:x}, data: {data:x}")
+        assert data & mask == 0xdeadbeef, f"for write {i} Expected 0xdeadbeef, found: {data:x}"
