@@ -74,16 +74,23 @@ class Pipeline:
 
         # reset
         self.i.rst = "true"
+        self.i.ins = "0"
+        self.i.tag = "0"
+        self.i.valid = "false"
+        self.i.data = "0"
+        self.i.d_tag = "0"
+        self.i.d_valid = "false"
+
         await self.clock()
         await self.clock()
         self.i.rst = "false"
         await self.clock()
 
     async def halfclock(self):
-        await FallingEdge(self.phase1)
+        await RisingEdge(self.phase1)
 
     async def clock(self):
-        await FallingEdge(self.phase2)
+        await RisingEdge(self.phase2)
 
 
 def rtype(op, rs, rt, rd, sh, func):
@@ -185,6 +192,10 @@ async def do_stores(p, prog, dut, loads=dict()):
     writes = []
 
     for inst in prog:
+        # simulate icache reads as completing halfway though the cycle
+        p.i.d_valid = "false"
+        p.i.ins = "0"
+        await p.halfclock()
         p.set_inst(inst)
         await p.clock()
         dut._log.info(f"index: {p.index():04x}, inst: {inst:08x}, mask: {p.w_mask_details()}")
@@ -226,7 +237,6 @@ async def store_word(dut):
     ]
 
     writes = await do_stores(p, prog, dut)
-
 
     assert writes, "No write found"
 

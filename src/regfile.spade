@@ -20,12 +20,22 @@ impl RegId {
             _ => false,
         }
     }
+
+    fn eq(self, other: RegId) -> bool {
+        match (self, other) {
+            (RegId::Integer(i), RegId::Integer(j)) => i == j,
+            (RegId::Float(i), RegId::Float(j)) => i == j,
+            _ => false,
+        }
+    }
 }
 
 pipeline(0) regfile(
-    clk: clock,
+    phase1: clock,
     rs: RegId,
     rt: RegId,
+    en_s: bool,
+    en_t: bool,
     write: (RegId, int<64>),
 )
     -> (int<64>, int<64>)
@@ -36,7 +46,7 @@ pipeline(0) regfile(
         // The r4200/r4300 has a unified register file with both integer and floating point registers.
         // Initialize them all to zero. Because we don't ever write to the zero register, it will stay zero
         let regs: Memory<int<64>, 64> = inst clocked_memory_init(
-            clk,
+            phase1,
             [(!rd.is_zero(), rd.index(), write_val)], // write ports
             [0, 0, 0, 0, 0, 0, 0, 0, // initial values
              0, 0, 0, 0, 0, 0, 0, 0,
@@ -50,17 +60,24 @@ pipeline(0) regfile(
 
         let rs_val = inst read_memory(regs, rs.index());
         let rt_val = inst read_memory(regs, rt.index());
-        (rs_val, rt_val)
+
+        (
+            if en_s { rs_val } else { 0 },
+            if en_t { rt_val } else { 0 }
+        )
 }
 
 pipeline(1) test(
-    clk: clock,
+    phase2: clock,
+    phase1: clock,
     rs: RegId,
     rt: RegId,
     write: (RegId, int<64>),
 ) -> (int<64>, int<64>)
 {
-        let (rs_val, rt_val) = inst(0) regfile(clk, rs, rt, write);
+        let en_s = true;
+        let en_t = true;
+        let (rs_val, rt_val) = inst(0) regfile(phase1, rs, rt, en_s, en_t, write);
     reg;
         (rs_val, rt_val)
 }

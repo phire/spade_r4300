@@ -124,6 +124,47 @@ fn shifter(mode: ExMode, shift_mux: int<64>, add_result: int<64>) -> (int<64>, M
         (shift_result, mask)
 }
 
+enum Bypass {
+    Zero,
+    ExResult,
+    DcResult,
+    Normal,
+}
+
+impl Bypass {
+    fn apply(self, regfile: int<64>, ex: int<64>, dc: int<64>) -> int<64> {
+        match self {
+            Bypass::Zero => 0,
+            Bypass::ExResult => ex,
+            Bypass::DcResult => dc,
+            Bypass::Normal => regfile,
+        }
+    }
+}
+
+fn check_bypass(reg_id: RegId, ex_dest: RegId, dc_dest: RegId) -> (bool, Bypass) {
+    if reg_id.is_zero() {
+        // Don't bypass the $zero register as we might get non-zero values
+        // from writes and instructions that are writing to the zero register.
+        (false, Bypass::Zero)
+    } else if ex_dest.index() == reg_id.index() {
+        (false, Bypass::ExResult)
+    } else if dc_dest.index() == reg_id.index() {
+        (false, Bypass::DcResult)
+    } else {
+        (true, Bypass::Normal)
+    }
+}
+
+fn apply_bypass(bypass: Bypass, ex_result: int<64>, dc_result: int<64>, read: int<64>) -> int<64> {
+    match bypass {
+        Bypass::Zero => 0,
+        Bypass::ExResult => ex_result,
+        Bypass::DcResult => dc_result,
+        Bypass::Normal => read,
+    }
+}
+
 pipeline(5) r4200_pipeline(
     phase2: clock,
     phase1: clock,
@@ -144,72 +185,65 @@ pipeline(5) r4200_pipeline(
 
         let rs = RegId::Integer( rs(ins) );
         let rt = RegId::Integer( rt(ins) );
-        let write = stage(WB).regfile_write;
-
-        let (rs_read, rt_read) = inst(0) regfile$(clk: phase2, rs, rt, write);
         let rd = RegId::Integer( rd(ins) );
 
-        // Bypass muxes
-        let _ = stage(EX).dest;
-        let _ = stage(EX).data;
-        let _ = stage(DC).dc_data;
+        // We pre-calculate the bypassing here, because the register read ports
+        // are disabled when bypassing for power saving reasons:
+        //    "To save power, each read port can be disabled independently for
+        //     instructions not requiring a read operand from that port or at
+        //     certain times when the read operand is being bypassed from a
+        //     later pipeline stage." - unified datapath paper
 
-        let rs_val = if rs.index() == 0 {
-             0
-        } else if stage(EX).dest.index() == rs.index() {
-            stage(EX).data
-        } else if stage(DC).dest.index() == rs.index() {
-            stage(DC).dc_data
-        } else if stage(WB).dest.index() == rs.index() {
-            stage(WB).dc_data
-        } else {
-            rs_read
-        };
+        let (en_s, rs_bypass) = check_bypass(rs, stage(EX).dest, stage(DC).dest);
+        let (en_t, rt_bypass) = check_bypass(rt, stage(EX).dest, stage(DC).dest);
 
-        let rt_val = if rt.index() == 0 {
-            0
-        } else if stage(EX).dest.index() == rt.index() {
-            stage(EX).data
-        } else if stage(DC).dest.index() == rt.index() {
-            stage(DC).dc_data
-        } else if stage(WB).dest.index() == rt.index() {
-            stage(WB).dc_data
-        } else {
-            rt_read
-        };
+        let write = stage(WB).regfile_write;
+        let (rs_read, rt_read) = inst(0) regfile$(phase1, rs, rt, en_s, en_t, write);
 
         let inst_info = decode(ins);
+        let dest = match inst_info.rf_muxing {
+            RFMuxing::RsRt => rd,
+            RFMuxing::RsImmSigned => rt,
+            RFMuxing::RsImmUnsigned => rt,
+            RFMuxing::ImmUpper => rt,
+            RFMuxing::Shift => rd,
+            RFMuxing::Shift64 => rd,
+            RFMuxing::Memory => rt,
+            RFMuxing::MemoryNoWB => RegId::Integer(0),
+            RFMuxing::Jump26 => RegId::Integer(0),
+        };
+
+    reg;
+        'EX // Execute
+
+    // Bypass muxes
+        let rs_val = rs_bypass.apply(rs_read, stage(DC).ex_result, stage(WB).dc_result);
+        let rt_val = rt_bypass.apply(rt_read, stage(DC).ex_result, stage(WB).dc_result);
+
         let imm16: int<16> = uint_to_int(trunc(ins));
         let imm26: int<28> = uint_to_int(trunc(ins << 2));
         let imm_shift: int<5> = uint_to_int(trunc(ins >> 6));
 
-        let (imm, dest): (int<64>, RegId) = match inst_info.rf_muxing {
-            RFMuxing::RsRt => (0, rt),
-            RFMuxing::RsImmSigned => (sext(imm16), rt),
-            RFMuxing::RsImmUnsigned => (concat(0, imm16), rt),
-            RFMuxing::ImmUpper => (sext(imm16), rt),
-            RFMuxing::Shift => (concat(0, imm_shift), rd),
-            RFMuxing::Shift64 => (concat(1, imm_shift), rd),
-            RFMuxing::Memory => (sext(imm16), rt),
-            RFMuxing::MemoryNoWB => (sext(imm16), RegId::Integer(0)),
+        let imm: int<64> = match inst_info.rf_muxing {
+            RFMuxing::RsRt => 0,
+            RFMuxing::RsImmSigned => sext(imm16),
+            RFMuxing::RsImmUnsigned => concat(0, imm16),
+            RFMuxing::ImmUpper => sext(imm16),
+            RFMuxing::Shift => concat(0, imm_shift),
+            RFMuxing::Shift64 => concat(1, imm_shift),
+            RFMuxing::Memory => sext(imm16),
+            RFMuxing::MemoryNoWB => sext(imm16),
             RFMuxing::Jump26 => {
                 let upper_bits: int<36> = uint_to_int(trunc(pc >> 28));
-                (concat(upper_bits, imm26), RegId::Integer(0))
+                concat(upper_bits, imm26)
             },
         };
-
-        // The diagrams kind of imply that there are separate paths for logic operations,
-        // but I think they actually use x/y again. But the diagrams are trying
-        // to indicate that only certain values can be used, as logic always
-        // takes RS on the left and RT or Imm on the right.
 
         let (x_mux, y_mux, shift_mux) = match inst_info.rf_muxing {
             RFMuxing::RsRt => (rs_val, rt_val, 0),
             RFMuxing::ImmUpper => (rs_val, rt_val, imm),
             _ => (rs_val, imm, rt_val),
         };
-    reg;
-        'EX // Execute
 
     // LogicOps:
         let is_zero = x_mux == 0;
@@ -297,7 +331,7 @@ pipeline(5) r4200_pipeline(
 
     // Packer:
         // todo: pack floating point results
-        let data: int<64> = result_mux;
+        let ex_result: int<64> = result_mux;
 
     reg;
         'DC // Data Cache
@@ -314,21 +348,21 @@ pipeline(5) r4200_pipeline(
             MemMode::ConditionalStore => Option::Some(mask),
             _ => Option::None,
         };
-        let dcache_write = (data, write_mask);
+        let dcache_write = (ex_result, write_mask);
 
-        let dc_data = match inst_info.mem_mode {
-            MemMode::Nop => data,
+        let dc_result = match inst_info.mem_mode {
+            MemMode::Nop => ex_result,
             MemMode::Load => aligned_load,
-            MemMode::Store => data,
-            MemMode::Cache => data,
-            LinkedLoad => aligned_load,
-            ConditionalStore => 1,
+            MemMode::Store => 0,
+            MemMode::Cache => 0,
+            MemMode::LinkedLoad => aligned_load,
+            MemMode::ConditionalStore => 1,
         };
 
     reg;
         'WB // Writeback
 
-        let regfile_write = (dest, dc_data);
+        let regfile_write = (dest, dc_result);
     reg;
         PipelineResult::Ok(stage(IC).pc)
 }

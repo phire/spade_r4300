@@ -20,28 +20,53 @@ def none() -> str:
 def t(*values) -> str:
     return f"({ ", ".join([str(v) for v in values]) })"
 
-@cocotb.test()
-async def basic_operation(dut):
+async def start(dut):
     s = SpadeExt(dut)
 
-    clk = dut.clk_i
+    phase1 = dut.phase1_i
+    phase2 = dut.phase2_i
+    async def custom_clock():
+        # pre-construct triggers for performance
+        time = Timer(10, units="ps")
+        await Timer(5, units="ps")
+        while True:
+            phase1.value = 1
+            phase2.value = 0
+            await time
+            phase1.value = 0
+            phase2.value = 1
+            await time
 
-    await cocotb.start(Clock(clk, 10, units='ns').start())
-
-    await FallingEdge(clk)
-
+    await cocotb.start(custom_clock())
+    s.i.write = t(RegId(0), 0)
     s.i.rs = RegId(0)
-    s.i.rt = RegId(1)
+    s.i.rt = RegId(0)
+    await RisingEdge(phase2)
+    await RisingEdge(phase2)
+
+    return (s, phase1, phase2)
+
+@cocotb.test()
+async def basic_operation(dut):
+    s, phase1, phase2 = await start(dut)
+
     s.i.write = t(RegId(1), 0xdeadbeef)
 
-    await FallingEdge(clk)
+    await RisingEdge(phase1)
+    s.i.rs = RegId(0)
+    s.i.rt = RegId(1)
+
+    await RisingEdge(phase2)
 
     s.o.assert_eq(t(0, 0))
+    s.i.rs = RegId(0)
+    s.i.rt = RegId(0)
+
+    await RisingEdge(phase1)
 
     s.i.rs = RegId(0)
     s.i.rt = RegId(1)
-    s.i.write = t(RegId(0), 0)
 
-    await FallingEdge(clk)
+    await RisingEdge(phase2)
 
     s.o.assert_eq(t(0, 0xdeadbeef))
