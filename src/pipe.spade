@@ -13,6 +13,8 @@ use lib::instructions::ExMode;
 use lib::instructions::Compare;
 use lib::instructions::Trap;
 use lib::instructions::MemMode;
+use lib::instructions::Shift;
+use lib::instructions::ShiftSrc;
 
 use lib::dcache::dcache_access;
 use lib::dcache::DCache;
@@ -42,9 +44,8 @@ enum PipelineResult {
     NotOk,
 }
 
-fn adder(mode: ExMode, x: int<64>, y: int<64>) -> int<64> {
-        let op_x = int_to_uint(x);
-        let y = int_to_uint(y);
+fn adder(mode: ExMode, x: uint<64>, y: uint<64>) -> uint<64> {
+        let op_x = x;
         let (op_y, carry_in) = match mode {
             ExMode::Sub32 => (~y, 1),
             ExMode::Sub64 => (~y, 1),
@@ -54,8 +55,11 @@ fn adder(mode: ExMode, x: int<64>, y: int<64>) -> int<64> {
         };
 
         let adder_out: uint<66> = (op_x + op_y + carry_in);
-        let out64: int<64> = uint_to_int(trunc(adder_out));
-        let out32: int<32> = trunc(out64);
+        let out64: uint<64> = (trunc(adder_out));
+        let out32: uint<64> = {
+            let o32: uint<32> = trunc(out64);
+            int_to_uint(sext(uint_to_int(o32)))
+        };
 
         let carry_out: bool = (adder_out >> 64) == 1;
         let sign_out: bool = (out64 >> 63) == 1;
@@ -63,65 +67,52 @@ fn adder(mode: ExMode, x: int<64>, y: int<64>) -> int<64> {
         match mode {
                 ExMode::SetLess => if carry_out && !sign_out { 0 } else { 1 },
                 ExMode::SetLessUnsigned => if carry_out { 0 } else { 1 },
-                ExMode::Add32 => sext(out32),
-                ExMode::Sub32 => sext(out32),
+                ExMode::Add32 => out32,
+                ExMode::Sub32 => out32,
                 _ => out64,
         }
 }
 
-fn store_align(size: uint<4>, addr_bits: uint<3>, data: int<64>) -> (int<64>, MemMask)
+fn shifter(mode: ExMode, shift_mux: uint<64>, rs_val: uint<64>, ins: uint<32>) -> (uint<64>, MemMask)
 {
-    let mask = mem_mask(size, addr_bits);
+    match mode {
+        ExMode::Shift(dir, src) => {
 
-    // let misalignment = addr_bits & 0x7;
-    // let byte_shift = uint_to_int(concat(0, misalignment << 3));
+            let shift_imm: uint<5> = trunc(ins >> 6);
+            let amount = match src {
+                ShiftSrc::Imm => concat(0, shift_imm),
+                ShiftSrc::Imm32 => concat(1, shift_imm),
+                ShiftSrc::Reg5 => rs_val & 0x1f,
+                ShiftSrc::Reg6 => rs_val & 0x3f,
+                ShiftSrc::Const16 => 16,
+            };
 
-    // The Shifter is also used to rotate the data for stores that aren't
-    // 64-bit aligned.
-    // The adder was calculating the virtual address, so we can take the
-    // lower 3 bits of the result to determine the required byte shift.
-    // let result = data << byte_shift;
-    // let size_shift: uint<8> = zext(8 - size);
+            let result = match dir {
+                Shift::LeftLogic => shift_mux << amount,
+                Shift::RightLogic => shift_mux >> amount,
+                Shift::RightArith => shift_mux >>> amount,
+            };
 
-    let result = mask.align(int_to_uint(data));
+            (result, null_mask())
+        },
+        ExMode::Memory(size) => {
+            // The Shifter is also used to rotate the data for stores that aren't
+            // 64-bit aligned.
 
-    // TODO: post shift word order swap
+            let addr_offset: uint<3> = trunc(ins);
 
-    (uint_to_int(result), mask)
-}
+            // I'm not sure if this is just tapped off the main adder, or if there
+            // is a separate adder just for calculating the required alignment shift
+            let lower_addr = trunc(rs_val) + addr_offset;
 
-fn shifter(mode: ExMode, shift_mux: int<64>, add_result: int<64>) -> (int<64>, MemMask)
-{
-    // Shifter:
-        // The bottom 3, 5 or 6 bits of the adder are used as the shift amount.
-        // Because this shifter is used to align the data for memory store operations,
-        // it needs to shift based on the lower bits of the virtual address, which is
-        // being calculated in the adder. So there is a tap to take the lower bits of
-        // the add result before the add even completes.
+            let mask = mem_mask(size, lower_addr);
 
-        // This is a clever MIPS instruction encoding trick. A variable shift
-        // instruction puts the shift amount in RS and requires that the SA field be 0.
-        // A fixed shift instruction puts the shift amount in the SA field and requires
-        // the RS field to be 0 (aka the zero register).
-        // So the RF stage will always configure the adder to do RS + Imm, and
-        // the Imm decoder will be configured to select the SA field.
-        let shift5 = add_result & 0x1f;
-        let shift6 = add_result & 0x3f;
-        let addr_bits = int_to_uint(trunc(add_result & 0x7));
+            // TODO: word order swap for little-endian mode
 
-        let (shift_result, mask) = match mode {
-            ExMode::ShiftLeft         => (shift_mux << shift5, null_mask()),
-            ExMode::ShiftLeft64       => (shift_mux << shift6, null_mask()),
-            ExMode::ShiftRight        => (shift_mux >> shift5, null_mask()),
-            ExMode::ShiftRight64      => (shift_mux >> shift6, null_mask()),
-            ExMode::ShiftRightArith   => (shift_mux >>> shift5, null_mask()),
-            ExMode::ShiftRightArith64 => (shift_mux >>> shift6, null_mask()),
-            ExMode::InsertUpper       => (shift_mux << 16, null_mask()),
-            ExMode::Memory(size) => store_align(size, addr_bits, shift_mux),
-            _ => (0, null_mask()),
-        };
-
-        (shift_result, mask)
+            (mask.align(shift_mux), mask)
+        },
+        _ => (shift_mux, null_mask()),
+    }
 }
 
 enum Bypass {
@@ -132,7 +123,7 @@ enum Bypass {
 }
 
 impl Bypass {
-    fn apply(self, regfile: int<64>, ex: int<64>, dc: int<64>) -> int<64> {
+    fn apply(self, regfile: uint<64>, ex: uint<64>, dc: uint<64>) -> uint<64> {
         match self {
             Bypass::Zero => 0,
             Bypass::ExResult => ex,
@@ -153,15 +144,6 @@ fn check_bypass(reg_id: RegId, ex_dest: RegId, dc_dest: RegId) -> (bool, Bypass)
         (false, Bypass::DcResult)
     } else {
         (true, Bypass::Normal)
-    }
-}
-
-fn apply_bypass(bypass: Bypass, ex_result: int<64>, dc_result: int<64>, read: int<64>) -> int<64> {
-    match bypass {
-        Bypass::Zero => 0,
-        Bypass::ExResult => ex_result,
-        Bypass::DcResult => dc_result,
-        Bypass::Normal => read,
     }
 }
 
@@ -201,8 +183,11 @@ pipeline(5) r4200_pipeline(
         let (rs_read, rt_read) = inst(0) regfile$(phase1, rs, rt, en_s, en_t, write);
 
         let inst_info = decode(ins);
+    reg;
+        'EX // Execute
+
         let dest = match inst_info.rf_muxing {
-            RFMuxing::RsRt => rd,
+            RFMuxing::RsRt => rt,
             RFMuxing::RsImmSigned => rt,
             RFMuxing::RsImmUnsigned => rt,
             RFMuxing::ImmUpper => rt,
@@ -213,80 +198,91 @@ pipeline(5) r4200_pipeline(
             RFMuxing::Jump26 => RegId::Integer(0),
         };
 
-    reg;
-        'EX // Execute
-
     // Bypass muxes
         let rs_val = rs_bypass.apply(rs_read, stage(DC).ex_result, stage(WB).dc_result);
         let rt_val = rt_bypass.apply(rt_read, stage(DC).ex_result, stage(WB).dc_result);
 
-        let imm16: int<16> = uint_to_int(trunc(ins));
-        let imm26: int<28> = uint_to_int(trunc(ins << 2));
-        let imm_shift: int<5> = uint_to_int(trunc(ins >> 6));
+    // Immediate sign extend:
+        let imm16: uint<16> = trunc(ins);
+        let signed_imm: uint<64> = int_to_uint(sext(uint_to_int(imm16)));
 
-        let imm: int<64> = match inst_info.rf_muxing {
-            RFMuxing::RsRt => 0,
-            RFMuxing::RsImmSigned => sext(imm16),
-            RFMuxing::RsImmUnsigned => concat(0, imm16),
-            RFMuxing::ImmUpper => sext(imm16),
-            RFMuxing::Shift => concat(0, imm_shift),
-            RFMuxing::Shift64 => concat(1, imm_shift),
-            RFMuxing::Memory => sext(imm16),
-            RFMuxing::MemoryNoWB => sext(imm16),
-            RFMuxing::Jump26 => {
-                let upper_bits: int<36> = uint_to_int(trunc(pc >> 28));
-                concat(upper_bits, imm26)
-            },
+    // LogicUnit:
+        let op_mux = match inst_info.rf_muxing {
+            RFMuxing::RsRt => rt_val,
+            // From what I can tell, the logic unit always use unsigned immediates
+            // while the adder always does a sign-extend on it's immediates
+            _ => zext(imm16),
         };
-
-        let (x_mux, y_mux, shift_mux) = match inst_info.rf_muxing {
-            RFMuxing::RsRt => (rs_val, rt_val, 0),
-            RFMuxing::ImmUpper => (rs_val, rt_val, imm),
-            _ => (rs_val, imm, rt_val),
-        };
-
-    // LogicOps:
-        let is_zero = x_mux == 0;
-        let is_neg = (x_mux >> 63) == 1;
 
         let logic_result = match inst_info.ex_mode {
-            ExMode::And => trunc(x_mux & y_mux),
-            ExMode::Or => trunc(x_mux | y_mux),
-            ExMode::Xor => trunc(x_mux ^ y_mux),
-            ExMode::Nor => trunc(~(x_mux | y_mux)),
-            ExMode::Branch(cmp) => {
-                let cmp_result = match cmp {
-                    Compare::Equal => is_zero,
-                    Compare::NotEqual => !is_zero,
-                    Compare::GreaterThanZero => !is_neg && !is_zero,
-                    Compare::GreaterEqualZero => !is_neg || is_zero,
-                    Compare::LessThanZero => is_neg && !is_zero,
-                    Compare::LessEqualZero => is_neg || is_zero,
-                };
-                if cmp_result { 1 } else { 0 }
-            },
+            ExMode::And => trunc(rs_val & op_mux),
+            ExMode::Or => trunc(rs_val | op_mux),
+            ExMode::Xor => trunc(rs_val ^ op_mux),
+            ExMode::Nor => trunc(~(rs_val | op_mux)),
             _ => 0,
         };
+
+        // The logic unit responsible for "detecting equal operands for integer and
+        // floating- point operand comparisons and determining the outcome of conditional
+        // branches and traps." -- unified datapath paper
+        // It's scope is limited to just operations are either equality, or sign relative to zero.
+        // These compares are the only compares that can be in branch/trap instructions.
+        // More complex compare instructions are executed as a subtract on the adder
+        // and can't be used for branching.
+
+        let is_zero = rs_val == 0;
+        let is_neg = (rs_val >> 63) == 1;
+        let is_equal = rs_val == rt_val;
+
+        let branch_compare = match inst_info.ex_mode {
+            ExMode::Branch(Compare::Equal) => is_equal,
+            ExMode::Branch(Compare::NotEqual) => !is_equal,
+            ExMode::Branch(Compare::GreaterThanZero) => !is_neg && !is_zero,
+            ExMode::Branch(Compare::GreaterEqualZero) => !is_neg || is_zero,
+            ExMode::Branch(Compare::LessThanZero) => is_neg && !is_zero,
+            ExMode::Branch(Compare::LessEqualZero) => is_neg || is_zero,
+            _ => false,
+        };
+
+    // Shifter:
+        let shift_mux = match inst_info.rf_muxing {
+            RFMuxing::RsRt => rt_val,
+            RFMuxing::Memory => rt_val,
+            RFMuxing::MemoryNoWB => rt_val,
+            RFMuxing::RsImmSigned => signed_imm,
+            _ => 0,
+        };
+        let (shift_result, mask) = shifter(inst_info.ex_mode, shift_mux, rs_val, ins);
+
 
     // Instruction Adder:
         let thispc = stage(IC).pc;
         let reset_vector = 0xffffffff_bfc00000;
+        let pc_off = if branch_compare { signed_imm << 2 } else { 4 };
 
         let nextpc = if rst {
             reset_vector
         } else {
             match inst_info.ex_mode {
-                ExMode::Branch(_) => trunc(thispc +
-                    if logic_result == 0 { 4 } else { int_to_uint(y_mux << 2) }
-                ),
-                ExMode::UnconditionalBranch => int_to_uint(x_mux),
-                _ => trunc(thispc + 4),
+                ExMode::JumpImm26 => {
+                    let imm26: uint<28> = trunc(ins << 2);
+                    let upper_bits: uint<36> = trunc(pc >> 28);
+                    concat(upper_bits, imm26)
+                },
+                ExMode::JumpReg => rs_val,
+                _ => trunc(thispc + pc_off),
             }
         };
 
     // 64-bit Carry-Propagate adder:
+        let (x_mux, y_mux) =  match inst_info.rf_muxing {
+            // TODO: inputs from sum_reg and the multiplier
+            RFMuxing::RsRt => (rs_val, rt_val),
+            _ => (rs_val, signed_imm),
+        };
+
         let add_result = adder(inst_info.ex_mode, x_mux, y_mux);
-        let data_virtual_address = int_to_uint(add_result);
+        let data_virtual_address = add_result;
 
         let index = match inst_info.mem_mode {
             MemMode::Nop => Option::None,
@@ -296,8 +292,6 @@ pipeline(5) r4200_pipeline(
         // Start the dcache access now
         let dcache_access = inst(1) dcache_access(phase2, dcache, index, stage(+1).dcache_write);
 
-    // Shifter:
-        let (shift_result, mask) = shifter(inst_info.ex_mode, shift_mux, add_result);
 
     // R Mux:
         // Logically it would make more sense to have a single 3-way Result mux later on.
@@ -331,7 +325,7 @@ pipeline(5) r4200_pipeline(
 
     // Packer:
         // todo: pack floating point results
-        let ex_result: int<64> = result_mux;
+        let ex_result: uint<64> = result_mux;
 
     reg;
         'DC // Data Cache
@@ -341,7 +335,7 @@ pipeline(5) r4200_pipeline(
     // Load aligner:
         // The main shifter is used to align data for stores, but for timing
         // requirements, there is a separate shifter to align data from loads.
-        let aligned_load = uint_to_int(mask.extract(dcache_access.data));
+        let aligned_load = mask.extract(dcache_access.data);
 
         let write_mask = match inst_info.mem_mode {
             MemMode::Store => Option::Some(mask),
@@ -369,16 +363,16 @@ pipeline(5) r4200_pipeline(
 
 pipeline(1) test_adder(clk: clock, mode: ExMode, x: uint<64>, y: uint<64>) -> uint<64>
 {
-        let add_result = adder(mode, uint_to_int(x), uint_to_int(y));
+        let add_result = adder(mode, x, y);
     reg;
-        int_to_uint(add_result)
+        add_result
 }
 
-pipeline(1) test_shifter(clk: clock, mode: ExMode, shift_mux: uint<64>, add_result: int<64>) -> uint<64>
+pipeline(1) test_shifter(clk: clock, mode: ExMode, shift_mux: uint<64>, rs_val: uint<64>, ins: uint<32>) -> uint<64>
 {
-        let (shift_result, mask) = shifter(mode, uint_to_int(shift_mux), add_result);
+        let (shift_result, mask) = shifter(mode, shift_mux, rs_val, ins);
     reg;
-        int_to_uint(shift_result)
+        shift_result
 }
 
 struct TestResult {

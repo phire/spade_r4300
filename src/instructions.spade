@@ -40,9 +40,24 @@ enum Trap {
     Compare,
 }
 
+enum Shift {
+    LeftLogic,
+    RightLogic,
+    RightArith,
+}
+
+enum ShiftSrc {
+    Imm, // 5-bit imm
+    Imm32, // 32 + 5-bit imm
+    Reg5, // bottom 5 bits of Rs
+    Reg6, // bottom 6 bits of Rs
+    Const16, // 16
+}
+
 enum ExMode {
     Nop,
-    UnconditionalBranch,
+    JumpReg,
+    JumpImm26,
     Branch{cmp: Compare},
     Compare{cmp: Compare},
     Memory{size: uint<4>},
@@ -56,13 +71,7 @@ enum ExMode {
     SetLessUnsigned,
 
 // Shifter
-    ShiftLeft,
-    ShiftRight,
-    ShiftRightArith,
-    ShiftLeft64,
-    ShiftRight64,
-    ShiftRightArith64,
-    InsertUpper,
+    Shift{dir: Shift, mode: ShiftSrc},
 
 // Logic
     And,
@@ -152,11 +161,11 @@ fn adder(mode: ExMode) -> InstructionInfo {
     )
 }
 
-fn shift(mode: ExMode) -> InstructionInfo {
+fn shift(dir: Shift, src: ShiftSrc) -> InstructionInfo {
     InstructionInfo$ (
         regfile_mode: RegfileMode::ReadInterger,
-        rf_muxing: RFMuxing::Shift,
-        ex_mode: mode,
+        rf_muxing: RFMuxing::RsRt,
+        ex_mode: ExMode::Shift(dir, src),
         exception: Trap::None,
         mem_mode: MemMode::Nop,
     )
@@ -248,14 +257,14 @@ fn decode(ins: uint<32>) -> InstructionInfo {
         0b000010 => InstructionInfo$ ( // J
             regfile_mode: RegfileMode::ReadInterger,
             rf_muxing: RFMuxing::Jump26,
-            ex_mode: ExMode::UnconditionalBranch,
+            ex_mode: ExMode::JumpImm26,
             exception: Trap::None,
             mem_mode: MemMode::Nop,
         ),
         0b000011 => InstructionInfo$ ( // JAL
             regfile_mode: RegfileMode::ReadInterger,
             rf_muxing: RFMuxing::Jump26,
-            ex_mode: ExMode::UnconditionalBranch,
+            ex_mode: ExMode::JumpImm26,
             exception: Trap::None,
             mem_mode: MemMode::Nop,
         ),
@@ -274,8 +283,8 @@ fn decode(ins: uint<32>) -> InstructionInfo {
         0b001111 => // LUI
             only_zero(rs, InstructionInfo$ (
                 regfile_mode: RegfileMode::Nop,
-                rf_muxing: RFMuxing::ImmUpper,
-                ex_mode: ExMode::InsertUpper,
+                rf_muxing: RFMuxing::RsImmSigned,
+                ex_mode: ExMode::Shift(Shift::LeftLogic, ShiftSrc::Const16),
                 exception: Trap::None,
                 mem_mode: MemMode::Nop,
             )),
@@ -352,27 +361,27 @@ fn decode_special(ins: uint<32>) -> InstructionInfo {
 
     match special {
         // 0
-        0b000000 => imm(shift(ExMode::ShiftLeft)), // SLL
+        0b000000 => shift(Shift::LeftLogic, ShiftSrc::Imm), // SLL
         0b000001 => exception(),
-        0b000010 => imm(shift(ExMode::ShiftRight)), // SRL
-        0b000011 => imm(shift(ExMode::ShiftRightArith)), // SRA
-        0b000100 => shift(ExMode::ShiftLeft), // SLLV
+        0b000010 => shift(Shift::RightLogic, ShiftSrc::Imm), // SRL
+        0b000011 => shift(Shift::RightArith, ShiftSrc::Imm), // SRA
+        0b000100 => shift(Shift::LeftLogic, ShiftSrc::Reg5), // SLLV
         0b000001 => exception(),
-        0b000110 => shift(ExMode::ShiftRight), // SRLV
-        0b000111 => shift(ExMode::ShiftRightArith), // SRAV
+        0b000110 => shift(Shift::RightLogic, ShiftSrc::Reg5), // SRLV
+        0b000111 => shift(Shift::RightArith, ShiftSrc::Reg5), // SRAV
 
         // 1
         0b001000 => only_zero(rt_rd_sa, InstructionInfo$ ( // JR
             regfile_mode: RegfileMode::ReadInterger,
             rf_muxing: RFMuxing::RsRt,
-            ex_mode: ExMode::UnconditionalBranch,
+            ex_mode: ExMode::JumpReg,
             exception: Trap::None,
             mem_mode: MemMode::Nop,
         )),
         0b001001 => only_zero(rt_sa, InstructionInfo$ ( // JALR
             regfile_mode: RegfileMode::ReadInterger,
             rf_muxing: RFMuxing::RsRt,
-            ex_mode: ExMode::UnconditionalBranch,
+            ex_mode: ExMode::JumpReg,
             exception: Trap::None,
             mem_mode: MemMode::Nop,
         )),
@@ -393,10 +402,10 @@ fn decode_special(ins: uint<32>) -> InstructionInfo {
         0b010001 => unimplemented(), // MTHI
         0b010010 => unimplemented(), // MFLO
         0b010011 => unimplemented(), // MTLO
-        0b010100 => shift(ExMode::ShiftLeft64), // DSLLV
+        0b010100 => shift(Shift::LeftLogic, ShiftSrc::Reg6), // DSLLV
         0b010101 => exception(),
-        0b010110 => shift(ExMode::ShiftRight64), // DSRLV
-        0b010111 => shift(ExMode::ShiftRightArith64), // DSRAV
+        0b010110 => shift(Shift::RightLogic, ShiftSrc::Reg6), // DSRLV
+        0b010111 => shift(Shift::RightArith, ShiftSrc::Reg6), // DSRAV
 
         // 3
         0b011000 => unimplemented(), // MULT
@@ -439,14 +448,14 @@ fn decode_special(ins: uint<32>) -> InstructionInfo {
         0b110111 => exception(),
 
         // 7
-        0b111000 => shift(ExMode::ShiftLeft64), // DSLL
+        0b111000 => shift(Shift::LeftLogic, ShiftSrc::Imm), // DSLL
         0b111001 => exception(),
-        0b111010 => shift(ExMode::ShiftRight64), // DSRL
-        0b111011 => shift(ExMode::ShiftRightArith64), // DSRA
-        0b111100 => imm(shift(ExMode::ShiftLeft64)), // DSLL32
+        0b111010 => shift(Shift::RightLogic, ShiftSrc::Imm), // DSRL
+        0b111011 => shift(Shift::RightArith, ShiftSrc::Imm), // DSRA
+        0b111100 => shift(Shift::LeftLogic, ShiftSrc::Imm32), // DSLL32
         0b111101 => exception(),
-        0b111110 => imm(shift(ExMode::ShiftRight64)), // DSRL32
-        0b111111 => imm(shift(ExMode::ShiftRightArith64)), // DSRA32
+        0b111110 => shift(Shift::RightLogic, ShiftSrc::Imm32), // DSRL32
+        0b111111 => shift(Shift::RightArith, ShiftSrc::Imm32), // DSRA32
     }
 }
 

@@ -67,12 +67,12 @@ struct port DCache {
     write_mask: &mut Option<MemMask>,
 }
 
-pipeline(1) dcache_access(clk: clock, dcache: DCache, read_index: Option<uint<12>>, write: (int<64>, Option<MemMask>)) -> DResult
+pipeline(1) dcache_access(clk: clock, dcache: DCache, read_index: Option<uint<12>>, write: (uint<64>, Option<MemMask>)) -> DResult
 {
         let (data, write_mask) = write;
 
         set dcache.index = read_index;
-        set dcache.write = int_to_uint(data);
+        set dcache.write = data;
         set dcache.write_mask = write_mask;
     reg;
         *dcache.result

@@ -13,7 +13,7 @@ async def start(dut):
     return s, clk
 
 async def do_shift(s, clk, val, shift, expected):
-    s.i.add_result = str(shift)
+    s.i.rs_val = str(shift)
     s.i.shift_mux = hex(val)
     await FallingEdge(clk)
     s.o.assert_eq(hex(expected))
@@ -23,7 +23,7 @@ async def do_shift(s, clk, val, shift, expected):
 async def shift_left(dut):
     s, clk = await start(dut)
 
-    s.i.mode = "ExMode::ShiftLeft"
+    s.i.mode = "ExMode::Shift(Shift::LeftLogic, ShiftSrc::Reg5)"
     # s.i.add_result = "3"
     # s.i.shift_mux = "1"
     # await FallingEdge(clk)
@@ -45,15 +45,14 @@ async def shift_left(dut):
     await do_shift(s, clk, 1, 33, 0x2)
 
     # or 6 bits when doing a shift by 64
-
-    s.i.mode = "ExMode::ShiftLeft64"
+    s.i.mode = "ExMode::Shift(Shift::LeftLogic, ShiftSrc::Reg6)"
     await do_shift(s, clk, 1, 33, 0x200000000)
 
 @cocotb.test()
 async def shift_right(dut):
     s, clk = await start(dut)
 
-    s.i.mode = "ExMode::ShiftRight"
+    s.i.mode = "ExMode::Shift(Shift::RightLogic, ShiftSrc::Reg5)"
     await do_shift(s, clk, 8, 3, 1)
 
     # check that it will cross 32bit boundaries
@@ -63,14 +62,14 @@ async def shift_right(dut):
     await do_shift(s, clk, 8, 34, 2)
 
     # or 6 bits when doing a shift by 64
-    s.i.mode = "ExMode::ShiftRight64"
+    s.i.mode = "ExMode::Shift(Shift::RightLogic, ShiftSrc::Reg6)"
     await do_shift(s, clk, 0x200000002, 33, 1)
 
 @cocotb.test()
 async def shift_right_arith(dut):
     s, clk = await start(dut)
 
-    s.i.mode = "ExMode::ShiftRightArith"
+    s.i.mode = "ExMode::Shift(Shift::RightArith, ShiftSrc::Reg5)"
     await do_shift(s, clk, 8, 3, 1)
 
     # check that it will cross 32bit boundaries
@@ -80,12 +79,12 @@ async def shift_right_arith(dut):
     await do_shift(s, clk, 8, 34, 2)
 
     # or 6 bits when doing a shift by 64
-    s.i.mode = "ExMode::ShiftRightArith64"
+    s.i.mode = "ExMode::Shift(Shift::RightArith, ShiftSrc::Reg6)"
     await do_shift(s, clk, 0x200000002, 33, 1)
 
     # check sign extention behavior
     await do_shift(s, clk, 0x8000_0000_0000_0000, 8, 0xff80_0000_0000_0000)
 
     # and with a 32bit shift
-    s.i.mode = "ExMode::ShiftRightArith"
+    s.i.mode = "ExMode::Shift(Shift::RightArith, ShiftSrc::Reg5)"
     await do_shift(s, clk, 0x8000_0000_0000_0000, 32 + 9, 0xffc0_0000_0000_0000)

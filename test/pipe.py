@@ -174,7 +174,7 @@ async def long_jump(dut):
 
     prog = [
         itype(0b001111, 0, 15, 0x00cc), # lui $r15, 0x00cc
-        itype(0b001101, 15, 15, 0xbba0), # ori $r15, $r15, 0x00cc
+        itype(0b001101, 15, 15, 0xbba0), # ori $r15, $r15, 0xbba0
         rtype(0, 15, 0, 0, 0, 0b001000), # jr $r15
         nop(10),
     ]

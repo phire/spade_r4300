@@ -36,16 +36,16 @@ pipeline(0) regfile(
     rt: RegId,
     en_s: bool,
     en_t: bool,
-    write: (RegId, int<64>),
+    write: (RegId, uint<64>),
 )
-    -> (int<64>, int<64>)
+    -> (uint<64>, uint<64>)
 {
         let (rd, write_val) = write;
         let we = !rd.is_zero();
 
         // The r4200/r4300 has a unified register file with both integer and floating point registers.
         // Initialize them all to zero. Because we don't ever write to the zero register, it will stay zero
-        let regs: Memory<int<64>, 64> = inst clocked_memory_init(
+        let regs: Memory<uint<64>, 64> = inst clocked_memory_init(
             phase1,
             [(!rd.is_zero(), rd.index(), write_val)], // write ports
             [0, 0, 0, 0, 0, 0, 0, 0, // initial values
@@ -72,8 +72,8 @@ pipeline(1) test(
     phase1: clock,
     rs: RegId,
     rt: RegId,
-    write: (RegId, int<64>),
-) -> (int<64>, int<64>)
+    write: (RegId, uint<64>),
+) -> (uint<64>, uint<64>)
 {
         let en_s = true;
         let en_t = true;
