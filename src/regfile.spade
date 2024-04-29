@@ -30,8 +30,9 @@ impl RegId {
     }
 }
 
-pipeline(0) regfile(
-    phase1: clock,
+pipeline(1) regfile(
+    phase2: clock, // Reads latched on phase2
+    phase1: clock, // Writes latched on phase1
     rs: RegId,
     rt: RegId,
     en_s: bool,
@@ -58,13 +59,11 @@ pipeline(0) regfile(
              0, 0, 0, 0, 0, 0, 0, 0]
         );
 
-        let rs_val = inst read_memory(regs, rs.index());
-        let rt_val = inst read_memory(regs, rt.index());
+        let rs_val = if en_s { inst read_memory(regs, rs.index()) } else { 0 };
+        let rt_val = if en_t { inst read_memory(regs, rt.index()) } else { 0 };
 
-        (
-            if en_s { rs_val } else { 0 },
-            if en_t { rt_val } else { 0 }
-        )
+    reg;
+        (rs_val, rt_val)
 }
 
 pipeline(1) test(
@@ -77,7 +76,7 @@ pipeline(1) test(
 {
         let en_s = true;
         let en_t = true;
-        let (rs_val, rt_val) = inst(0) regfile(phase1, rs, rt, en_s, en_t, write);
+        let (rs_val, rt_val) = inst(1) regfile(phase2, phase1, rs, rt, en_s, en_t, write);
     reg;
         (rs_val, rt_val)
 }

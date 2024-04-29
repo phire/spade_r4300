@@ -180,7 +180,7 @@ pipeline(5) r4200_pipeline(
         let (en_t, rt_bypass) = check_bypass(rt, stage(EX).dest, stage(DC).dest);
 
         let write = stage(WB).regfile_write;
-        let (rs_read, rt_read) = inst(0) regfile$(phase1, rs, rt, en_s, en_t, write);
+        let (rs_read, rt_read) = inst(1) regfile$(phase2, phase1, rs, rt, en_s, en_t, write);
 
         let inst_info = decode(ins);
     reg;
