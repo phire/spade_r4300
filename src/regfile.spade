@@ -23,6 +23,7 @@ impl RegId {
 
     fn eq(self, other: RegId) -> bool {
         match (self, other) {
+            (RegId::Integer(0), RegId::Integer(0)) => false,
             (RegId::Integer(i), RegId::Integer(j)) => i == j,
             (RegId::Float(i), RegId::Float(j)) => i == j,
             _ => false,
