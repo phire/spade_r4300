@@ -38,12 +38,6 @@ fn rd(ins: uint<32>) -> uint<5> {
     trunc(ins >> 11)
 }
 
-
-enum PipelineResult {
-    Ok{next_pc: uint<64>},
-    NotOk,
-}
-
 fn adder(mode: ExMode, x: uint<64>, y: uint<64>) -> uint<64> {
         let op_x = x;
         let (op_y, carry_in) = match mode {
@@ -148,6 +142,28 @@ fn check_bypass(reg_id: RegId, ex_dest: RegId, dc_dest: RegId) -> (bool, Bypass)
     }
 }
 
+enum Interlock{
+    None,
+    // From RF
+    InstructionTlbMiss,
+    InstructionCacheBusy,
+    // From EX
+    LoadInterlock,
+    MultiCycleInterlock,
+    Coprocessor2Interlock,
+    // From DC,
+    DataCacheMiss,
+    DataCacheBusy,
+    CacheOp,
+    // From WB
+    Coprocessor0Bypass,
+}
+
+enum PipelineResult {
+    Ok{next_pc: uint<64>},
+    Stall{interlock: Interlock},
+}
+
 pipeline(5) r4200_pipeline(
     phase2: clock,
     phase1: clock,
@@ -160,8 +176,9 @@ pipeline(5) r4200_pipeline(
         'IC // Instruction Cache
         // Nothing happens in phase1 of the IC stage
         // It's waiting for the program counter to be calculated during EX phase1
-        let (ins, cache_tag, valid) = inst(1) icache_read(phase1, icache, pc);
+        let (ins, itag, valid) = inst(1) icache_read(phase1, icache, pc);
         // todo: micro-TLB read
+        //let expected_itag = trunc(pc >> 12);
 
     reg;
         'RF // Register File
@@ -183,8 +200,15 @@ pipeline(5) r4200_pipeline(
         let write = stage(WB).regfile_write;
         let (rs_read, rt_read) = inst(1) regfile$(phase2, phase1, rs, rt, en_s, en_t, write);
 
-        let inst_info = decode(ins);
+        let interlock = if false {
+            Interlock::InstructionTlbMiss
+        } else if !valid { //|| itag != expected_itag {
+            Interlock::InstructionCacheBusy
+        } else {
+            Interlock::None
+        };
 
+        let inst_info = decode(ins);
     reg;
         'EX // Execute
 
@@ -295,15 +319,19 @@ pipeline(5) r4200_pipeline(
 
         let add_result = adder(inst_info.ex_mode, x_mux, y_mux);
         let data_virtual_address = add_result;
+        let index = trunc(data_virtual_address >> 3);
 
-        let index = match inst_info.mem_mode {
-            MemMode::Nop => Option::None,
-            _ => Option::Some(trunc(data_virtual_address >> 3)),
+        let (dcache_en, dcache_write_en) = match inst_info.mem_mode {
+            MemMode::Nop => (false, false),
+            MemMode::Load => (true, false),
+            MemMode::Store => (true, true),
+            MemMode::Cache => (true, false),
+            MemMode::LinkedLoad => (true, false),
+            MemMode::ConditionalStore => (true, true),
         };
 
         // Start the dcache access now
-        let dcache_access = inst(1) dcache_access(phase2, dcache, index, stage(+1).dcache_write);
-
+        let dcache_access = inst(1) dcache_access(phase2, dcache, index, dcache_en, stage(+1).dcache_write);
 
     // R Mux:
         // Logically it would make more sense to have a single 3-way Result mux later on.
@@ -339,6 +367,16 @@ pipeline(5) r4200_pipeline(
         // todo: pack floating point results
         let ex_result: uint<64> = result_mux;
 
+        let interlock = if load_interlock {
+            Interlock::LoadInterlock
+        } else if false {
+            Interlock::MultiCycleInterlock
+        } else if false {
+            Interlock::Coprocessor2Interlock
+        } else {
+            stage(-1).interlock
+        };
+
     reg;
         'DC // Data Cache
 
@@ -352,12 +390,7 @@ pipeline(5) r4200_pipeline(
         // requirements, there is a separate shifter to align data from loads.
         let aligned_load = mask.extract(dcache_access.data);
 
-        let write_mask = match inst_info.mem_mode {
-            MemMode::Store => Option::Some(mask),
-            MemMode::ConditionalStore => Option::Some(mask),
-            _ => Option::None,
-        };
-        let dcache_write = (ex_result, write_mask);
+        let dcache_write = (dcache_write_en, ex_result, mask);
 
         // We need an explicit reg here so it updates even when stalled
         reg(phase2) dc_result = match inst_info.mem_mode {
@@ -368,6 +401,18 @@ pipeline(5) r4200_pipeline(
             MemMode::LinkedLoad => aligned_load,
             MemMode::ConditionalStore => 1,
         };
+        //let tag_matched = dcache_access.tag != expected_tag;
+        let tag_matched = true;
+
+        let interlock = if dcache_en && !(dcache_access.valid && tag_matched) {
+            Interlock::DataCacheMiss
+        } else if dcache_access.busy {
+            Interlock::DataCacheBusy
+        } else if false {
+            Interlock::CacheOp
+        } else {
+            stage(-1).interlock
+        };
 
     reg;
         'WB // Writeback
@@ -375,10 +420,23 @@ pipeline(5) r4200_pipeline(
         // directly access the dc_result reg, otherwise it would be delayed a cycle
         let regfile_write = (dest, stage(-1).dc_result);
 
-        let interlock = stage(EX).load_interlock;
+        let interlock = if false {
+            Interlock::Coprocessor0Bypass
+        } else {
+            stage(-1).interlock
+        };
 
-    reg[!interlock || rst];
-        PipelineResult::Ok(stage(IC).pc)
+        let stall = match interlock {
+            Interlock::None => false,
+            _ => true,
+        };
+
+    reg[rst || !stall];
+        match (stage(0).rst, interlock) {
+            (true, _) => PipelineResult::Ok(stage(IC).pc),
+            (false, Interlock::None) => PipelineResult::Ok(stage(IC).pc),
+            _ => PipelineResult::Stall(interlock),
+        }
 }
 
 pipeline(1) test_adder(clk: clock, mode: ExMode, x: uint<64>, y: uint<64>) -> uint<64>
@@ -426,7 +484,7 @@ pipeline(5) test_pipeline(
     let icache = ICache$(request, result: &result);
 
     // And a fake Data Cache
-    let d_result = DResult$(data: data, tag: d_tag, valid: d_valid);
+    let d_result = DResult$(data: data, tag: d_tag, valid: d_valid, busy: false);
     let d_index = inst new_mut_wire();
     let d_write = inst new_mut_wire();
     let d_write_mask = inst new_mut_wire();
@@ -445,7 +503,7 @@ pipeline(5) test_pipeline(
 reg * 5;
     let next_pc = match status {
         PipelineResult::Ok(next_pc) => next_pc,
-        PipelineResult::NotOk => 0,
+        _ => 0,
     };
 
     let Request$( index: index ) = inst read_mut_wire(request);

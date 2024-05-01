@@ -58,6 +58,7 @@ struct DResult {
     data: uint<64>,
     tag: uint<20>,
     valid: bool,
+    busy: bool,
 }
 
 struct port DCache {
@@ -67,13 +68,13 @@ struct port DCache {
     write_mask: &mut Option<MemMask>,
 }
 
-pipeline(1) dcache_access(clk: clock, dcache: DCache, read_index: Option<uint<12>>, write: (uint<64>, Option<MemMask>)) -> DResult
+pipeline(1) dcache_access(clk: clock, dcache: DCache, index: uint<12>, read_en: bool, write: (bool, uint<64>, MemMask)) -> DResult
 {
-        let (data, write_mask) = write;
+        let (write_en, data, write_mask) = write;
 
-        set dcache.index = read_index;
+        set dcache.index = if read_en || write_en Option::Some(index) else Option::None;
         set dcache.write = data;
-        set dcache.write_mask = write_mask;
+        set dcache.write_mask = if write_en Option::Some(write_mask) else Option::None;
     reg;
         *dcache.result
 }
