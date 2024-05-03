@@ -1,5 +1,5 @@
 name = "r4300"
-compiler = { git = "https://gitlab.com/spade-lang/spade.git", branch = "main" }
+compiler = { path = "../spade" }
 
 [simulation]
 testbench_dir = "test"

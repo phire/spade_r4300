@@ -37,6 +37,7 @@ async def basic_check(dut):
 
     # And read it back
     s.i.addr = "0x18"
+    s.i.fetch_en = "true"
     await FallingEdge(clk)
     s.i.addr = "0x1c"
     s.o.assert_eq(t("0xbeefcafe", "0xcab77", "true"))
@@ -51,6 +52,7 @@ async def sequential(dut):
     await cocotb.start(Clock(clk, 10, units='ns').start())
     s.i.addr = "0x0"
     s.i.write = none()
+    s.i.en = "false"
 
     await FallingEdge(clk)
 
@@ -65,6 +67,7 @@ async def sequential(dut):
             await FallingEdge(clk)
 
     s.i.write = none()
+    s.i.fetch_en = "true"
     fails = []
 
     # verify it all with sequential reads
@@ -105,6 +108,7 @@ async def random(dut):
             await FallingEdge(clk)
 
     s.i.write = none()
+    s.i.fetch_en = "true"
 
     # visit in a random order
     for i in [0, 17, 27, 88, 89, 90, 89, 88, 87, 86, 10, 11, 12, 13, 15, 17, 18, 20]:

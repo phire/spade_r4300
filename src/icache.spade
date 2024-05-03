@@ -13,6 +13,7 @@ struct Result {
 }
 
 struct Request {
+    en: bool,
     index: uint<13>, // Which 32bit word within the the icache
 }
 
@@ -21,8 +22,9 @@ struct port ICache {
     result: &Result,
 }
 
-pipeline(1) icache_read(clk: clock, icache: ICache, virtual_addr: uint<64>) -> (uint<32>, uint<20>, bool) {
+pipeline(1) icache_read(clk: clock, icache: ICache, fetch_en: bool, virtual_addr: uint<64>) -> (uint<32>, uint<20>, bool) {
         set icache.request = Request$(
+            en: fetch_en,
             index: trunc(virtual_addr >> 2),
         );
     reg;
@@ -57,7 +59,7 @@ pipeline(1) instruction_cache(clk: clock, write: Option<(uint<11>, uint<20>, uin
         let mem2: Memory<uint<64>, 512> = inst clocked_memory(clk, [(en2, w_index, data)]);
         let mem3: Memory<uint<64>, 512> = inst clocked_memory(clk, [(en3, w_index, data)]);
 
-        let Request$(index: read_index ) = inst read_mut_wire(request);
+        let Request$(en, index: read_index ) = inst read_mut_wire(request);
         let read_word: uint<1> = trunc(read_index);
         let read_addr: uint<12> = trunc(read_index >> 1);
         let read_bank: uint<2> = trunc(read_addr >> 9);
@@ -69,7 +71,7 @@ pipeline(1) instruction_cache(clk: clock, write: Option<(uint<11>, uint<20>, uin
         // It holds two sequential instructions, fetched as a single read from the cache bank.
         // It lowers the icache access frequency by almost 50%.
         // Source:  https://youtu.be/nll5MWlG7q4?t=680
-        let read_enable = !write_enable && ( prefeteched_addr != read_addr || prefetch_invalid);
+        let read_enable = !write_enable && ( prefeteched_addr != read_addr || prefetch_invalid) && en;
         let mem_read_data = if read_enable {
             match read_bank {
                 0 => inst read_memory(mem0, trunc(read_addr)),
@@ -108,11 +110,12 @@ pipeline(1) icache_test_harness(
     clk: clock,
     write: Option<(uint<11>, uint<20>, uint<64>)>,
     addr: uint<64>,
+    fetch_en: bool
 )
   -> (uint<32>, uint<20>, bool)
 {
         let icache = inst(1) instruction_cache(clk, write);
-        let (data, tag, valid) = inst(1) icache_read(clk, icache, addr);
+        let (data, tag, valid) = inst(1) icache_read(clk, icache, fetch_en, addr);
 reg;
 
         (data, tag, valid)

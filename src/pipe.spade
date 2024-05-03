@@ -160,7 +160,8 @@ enum Interlock{
 }
 
 enum PipelineResult {
-    Ok{next_pc: uint<64>},
+    Ok,
+    Reset,
     Stall{interlock: Interlock},
 }
 
@@ -170,15 +171,16 @@ pipeline(5) r4200_pipeline(
     rst: bool,
     icache: ICache,
     dcache: DCache
-) -> PipelineResult
+) -> (uint<64>, PipelineResult)
 {
-        reg(phase1) pc = stage(EX).nextpc;
+        let fetch_en = stage.ready;
+        reg(phase1) pc = if fetch_en stage(EX).nextpc else pc;
         'IC // Instruction Cache
         // Nothing happens in phase1 of the IC stage
         // It's waiting for the program counter to be calculated during EX phase1
-        let (ins, itag, valid) = inst(1) icache_read(phase1, icache, pc);
+        let (ins, itag, valid) = inst(1) icache_read(phase1, icache, fetch_en, pc);
         // todo: micro-TLB read
-        //let expected_itag = trunc(pc >> 12);
+        let expected_itag = trunc(pc >> 12);
 
     reg;
         'RF // Register File
@@ -202,7 +204,7 @@ pipeline(5) r4200_pipeline(
 
         let interlock = if false {
             Interlock::InstructionTlbMiss
-        } else if !valid { //|| itag != expected_itag {
+        } else if fetch_en && (!valid || itag != expected_itag) {
             Interlock::InstructionCacheBusy
         } else {
             Interlock::None
@@ -401,8 +403,7 @@ pipeline(5) r4200_pipeline(
             MemMode::LinkedLoad => aligned_load,
             MemMode::ConditionalStore => 1,
         };
-        //let tag_matched = dcache_access.tag != expected_tag;
-        let tag_matched = true;
+        let tag_matched = dcache_access.tag == expected_tag;
 
         let interlock = if dcache_en && !(dcache_access.valid && tag_matched) {
             Interlock::DataCacheMiss
@@ -432,11 +433,12 @@ pipeline(5) r4200_pipeline(
         };
 
     reg[rst || !stall];
-        match (stage(0).rst, interlock) {
-            (true, _) => PipelineResult::Ok(stage(IC).pc),
-            (false, Interlock::None) => PipelineResult::Ok(stage(IC).pc),
-            _ => PipelineResult::Stall(interlock),
-        }
+        let status = match (false, stage(-1).interlock) {
+            (true, _) => PipelineResult::Reset,
+            (false, Interlock::None) => PipelineResult::Ok,
+            (false, reason) => PipelineResult::Stall(reason),
+        };
+        (stage(IC).pc, status)
 }
 
 pipeline(1) test_adder(clk: clock, mode: ExMode, x: uint<64>, y: uint<64>) -> uint<64>
@@ -456,10 +458,12 @@ pipeline(1) test_shifter(clk: clock, mode: ExMode, shift_mux: uint<64>, rs_val: 
 struct TestResult {
     next_pc: uint<64>,
     index: uint<13>,
+    fetch_en: bool,
     d_index: Option<uint<12>>,
     write: uint<64>,
     write_mask: MemMask,
     write_en: bool,
+    status: PipelineResult,
 }
 
 pipeline(5) test_pipeline(
@@ -497,16 +501,12 @@ pipeline(5) test_pipeline(
     );
 
     // instantiate the pipeline
-    let status = inst(5) r4200_pipeline(phase2, phase1, rst, icache, dcache);
+    let (next_pc, status) = inst(5) r4200_pipeline(phase2, phase1, rst, icache, dcache);
 
 
 reg * 5;
-    let next_pc = match status {
-        PipelineResult::Ok(next_pc) => next_pc,
-        _ => 0,
-    };
 
-    let Request$( index: index ) = inst read_mut_wire(request);
+    let Request$( en: fetch_en, index ) = inst read_mut_wire(request);
     let write = inst read_mut_wire(d_write);
     let (write_mask, write_en) = match inst read_mut_wire(d_write_mask) {
         Option::Some(mask) => (mask, true),
@@ -514,5 +514,5 @@ reg * 5;
     };
     let d_index = inst read_mut_wire(d_index);
 
-    TestResult$(next_pc, index, write, write_mask, write_en, d_index)
+    TestResult$(next_pc, index, fetch_en, write, write_mask, write_en, d_index, status)
 }

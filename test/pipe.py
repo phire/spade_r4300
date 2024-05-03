@@ -14,10 +14,13 @@ class Pipeline:
         self.phase1 = dut.phase1_i
         self.phase2 = dut.phase2_i
 
-    def set_inst(self, inst):
+    def set_inst(self, inst, tag=None, valid=True):
+        if tag is None:
+            tag = (self.next_pc() >> 12) & 0xfffff
+
         self.i.ins = hex(inst)
-        self.i.tag = hex((self.next_pc() >> 12) & 0xfffff)
-        self.i.valid = "true"
+        self.i.tag = hex(tag)
+        self.i.valid = "true" if valid else "false"
 
     def next_pc(self):
         try:
@@ -54,6 +57,12 @@ class Pipeline:
             return int(self.o.index.value(), 10)
         except:
             return 0xfff
+
+    def status(self):
+        return self.o.status.value()
+
+    def fetch_en(self):
+        return self.o.fetch_en.value() == "true"
 
     async def start(self):
         phase1 = self.phase1
@@ -195,12 +204,20 @@ async def do_stores(p, prog, dut, loads=dict()):
     open_row = None
     writes = []
 
-    for inst in prog:
+    timeout = 1000
+
+    for _ in range(1000):
         # simulate icache reads as completing halfway though the cycle
         p.i.ins = "0"
         await p.halfclock()
+        pc_index = p.index()
+        if pc_index >= len(prog):
+            return writes
+        inst = prog[pc_index]
+
         p.set_inst(inst)
         await p.clock()
+
         dut._log.info(f"index: {p.index():04x}, inst: {inst:08x}, mask: {p.w_mask_details()}")
 
         if p.write_mask() is not None:
@@ -224,7 +241,8 @@ async def do_stores(p, prog, dut, loads=dict()):
             p.i.data = "0"
             p.i.d_tag = "0"
 
-    return writes
+    raise Exception("Timeout")
+
 
 
 @cocotb.test()
@@ -374,3 +392,83 @@ async def bypassing(dut):
         row, mask, data = writes[i]
         dut._log.info(f"byte: {i}, mask: {mask:x}, data: {data:x}")
         assert data & mask == 0xdeadbeef, f"for write {i} Expected 0xdeadbeef, found: {data:x}"
+
+@cocotb.test()
+async def icache(dut):
+    p = Pipeline(dut)
+    await p.start()
+
+    jump = [
+        itype(0b001111, 0, 15, 0x2222), # lui $r15, 0x2222
+        itype(0b001101, 15, 15, 0x2220), # ori $r15, $r15, 0x2220
+        rtype(0, 15, 0, 0, 0, 0b001000), # jr $r15
+        nop(10),
+    ]
+    await do_stores(p, jump, dut)
+    assert p.next_pc() == 0x22222220
+
+    # should stall if invalid
+    p.set_inst(nop(0xeee), valid=False)
+    await p.clock()
+    dut._log.info(f"pc: {p.next_pc():x}, status: {p.status()}")
+    assert p.status() == "Stall(InstructionCacheBusy())"
+
+    # valid with correct tag... shouldn't stall
+    p.set_inst(nop(0xddd), tag=0x22222, valid=True)
+    await p.clock()
+    dut._log.info(f"pc: {p.next_pc():x}, status: {p.status()}")
+    assert p.status() == "Ok()"
+
+    # valid with incorrect tag... should stall
+    p.set_inst(nop(0xccc), tag=0x33333, valid=True)
+    await p.clock()
+    dut._log.info(f"pc: {p.next_pc():x}, status: {p.status()}")
+    assert p.status() == "Stall(InstructionCacheBusy())"
+
+@cocotb.test()
+async def dcache_miss(dut):
+    p = Pipeline(dut)
+    await p.start()
+    p.set_inst(0)
+    timeout = 20
+
+    while not p.fetch_en():
+        await p.clock()
+        if timeout == 0:
+            raise Exception("Timeout")
+        timeout -= 1
+
+
+    assert p.index() == 0
+
+    # TODO: implement dcache miss test
+    p.set_inst(itype(0b101011, 0, 0, 0x54)) # sw $zero, 0x54($zero)
+
+    await p.clock()
+    await p.halfclock()
+    assert p.fetch_en() and p.index() == 0
+
+    p.set_inst(nop())
+    assert p.status() == "Ok()"
+    await p.clock()
+    assert p.status() == "Ok()"
+    await p.clock()
+    # make sure the pipeline misses
+    assert p.status() == "Stall(DataCacheMiss())"
+
+    # and stays missed
+    # todo: This should switch to DataCacheBusy after one cycle
+    for i in range(10):
+        await p.clock()
+        assert p.status() == "Stall(DataCacheMiss())"
+        assert p.index() == 1
+        assert not p.fetch_en()
+
+    p.i.d_valid = "true"
+    p.i.data = "0xdeadbeefdeadbeef"
+    p.i.d_tag = "0"
+
+    await p.clock()
+
+    # and then comes out of miss
+    assert p.status() == "Ok()"

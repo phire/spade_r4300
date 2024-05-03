@@ -24,5 +24,7 @@ entity cpu(phase2: clock, phase1: clock, rst: bool, icache_write: Option<(uint<1
     );
 
     let icache = inst(1) instruction_cache(phase1, icache_write);
-    inst(5) r4200_pipeline(phase2, phase1, rst, icache, dcache)
+    let (pc, status) = inst(5) r4200_pipeline(phase2, phase1, rst, icache, dcache);
+
+    status
 }
