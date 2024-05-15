@@ -22,6 +22,7 @@ use lib::dcache::DResult;
 use lib::dcache::MemMask;
 use lib::dcache::mem_mask;
 use lib::dcache::null_mask;
+use lib::dcache::DTag;
 
 use std::ports::new_mut_wire;
 use std::ports::read_mut_wire;
@@ -387,12 +388,14 @@ pipeline(5) r4200_pipeline(
         // TODO: Get real tag from TLB
         let expected_tag: uint<20> = trunc(data_virtual_address >> 12);
 
+        let write_data = mask.clear(dcache_access.data) | ex_result;
+
+        let dcache_write = (dcache_write_en, ex_result, mask);
+
     // Load aligner:
         // The main shifter is used to align data for stores, but for timing
         // requirements, there is a separate shifter to align data from loads.
         let aligned_load = mask.extract(dcache_access.data);
-
-        let dcache_write = (dcache_write_en, ex_result, mask);
 
         // We need an explicit reg here so it updates even when stalled
         reg(phase2) dc_result = match inst_info.mem_mode {
@@ -403,9 +406,10 @@ pipeline(5) r4200_pipeline(
             MemMode::LinkedLoad => aligned_load,
             MemMode::ConditionalStore => 1,
         };
-        let tag_matched = dcache_access.tag == expected_tag;
+        let tag_matched = dcache_access.tag.tag == expected_tag;
+        let valid = dcache_access.tag.valid;
 
-        let interlock = if dcache_en && !(dcache_access.valid && tag_matched) {
+        let interlock = if dcache_en && !(valid && tag_matched) {
             Interlock::DataCacheMiss
         } else if dcache_access.busy {
             Interlock::DataCacheBusy
@@ -459,7 +463,8 @@ struct TestResult {
     next_pc: uint<64>,
     index: uint<13>,
     fetch_en: bool,
-    d_index: Option<uint<12>>,
+    d_index: uint<10>,
+    d_index_valid: bool,
     write: uint<64>,
     write_mask: MemMask,
     write_en: bool,
@@ -488,7 +493,10 @@ pipeline(5) test_pipeline(
     let icache = ICache$(request, result: &result);
 
     // And a fake Data Cache
-    let d_result = DResult$(data: data, tag: d_tag, valid: d_valid, busy: false);
+    let d_result = {
+        let tag = DTag$(tag: d_tag, valid: d_valid, dirty: false);
+        DResult$(data: data, tag, busy: false)
+    };
     let d_index = inst new_mut_wire();
     let d_write = inst new_mut_wire();
     let d_write_mask = inst new_mut_wire();
@@ -503,7 +511,6 @@ pipeline(5) test_pipeline(
     // instantiate the pipeline
     let (next_pc, status) = inst(5) r4200_pipeline(phase2, phase1, rst, icache, dcache);
 
-
 reg * 5;
 
     let Request$( en: fetch_en, index ) = inst read_mut_wire(request);
@@ -512,7 +519,10 @@ reg * 5;
         Option::Some(mask) => (mask, true),
         Option::None => (null_mask(), false),
     };
-    let d_index = inst read_mut_wire(d_index);
+    let (d_index, d_index_valid) = match inst read_mut_wire(d_index) {
+        Option::Some(index) => (index, true),
+        Option::None => (0, false),
+    };
 
-    TestResult$(next_pc, index, fetch_en, write, write_mask, write_en, d_index, status)
+    TestResult$(next_pc, index, fetch_en, write, write_mask, write_en, d_index, d_index_valid, status)
 }

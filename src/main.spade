@@ -5,13 +5,14 @@ use lib::pipe::PipelineResult;
 
 use lib::dcache::DResult;
 use lib::dcache::DCache;
+use lib::dcache::DTag;
 
 use std::ports::new_mut_wire;
 
 entity cpu(phase2: clock, phase1: clock, rst: bool, icache_write: Option<(uint<11>, uint<20>, uint<64>)>) -> PipelineResult {
 
     // fake dcache (for now)
-    let d_result = DResult$(data: 0, tag: 0, valid: false, busy: false);
+    let d_result = DResult$(data: 0, tag: DTag$(tag: 0, valid: false, dirty: false), busy: false);
     let d_index = inst new_mut_wire();
     let d_write = inst new_mut_wire();
     let d_write_mask = inst new_mut_wire();

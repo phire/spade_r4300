@@ -1,8 +1,44 @@
+use std::conv::uint_to_bits;
+use std::conv::bits_to_uint;
 
+use std::mem::clocked_memory;
+use std::mem::read_memory;
+
+use std::ports::new_mut_wire;
+use std::ports::read_mut_wire;
 
 struct MemMask {
     size: uint<3>, // 0 indexed
     align: uint<3>, // alignment within octbyte
+}
+
+fn chunks<#B, #N, #M>(data: uint<B>) -> [[bool; N]; M] {
+    std::conv::unsafe::unsafe_cast(data)
+}
+
+fn join<#B, #N, #M>(data: [[bool; N]; M]) -> uint<B> {
+    std::conv::unsafe::unsafe_cast(data)
+}
+
+// fn zip<#A, #B, T1, T2> (a: [T1; A], b: [T2; B]) -> [(T1, T2); A] {
+//     ()
+// }
+
+fn byte_mux2(selects: [bool; 8] , a: uint<64>, b: uint<64>) -> uint<64> {
+    let s = selects;
+    let a = chunks::<64, 8, 8>(a);
+    let b = chunks::<64, 8, 8>(b);
+
+    join::<64, 8, 8>([
+        if s[0] a[0] else b[0],
+        if s[1] a[1] else b[1],
+        if s[2] a[2] else b[2],
+        if s[3] a[3] else b[3],
+        if s[4] a[4] else b[4],
+        if s[5] a[5] else b[5],
+        if s[6] a[6] else b[6],
+        if s[7] a[7] else b[7],
+    ])
 }
 
 impl MemMask {
@@ -16,6 +52,22 @@ impl MemMask {
         let left_shift = trunc(inv_size - zext(self.align)) << 3;
 
         (0xffffffffffffffff >> right_shift) << left_shift
+    }
+
+    fn byte_mux(self, a: uint<64>, b: uint<64>) -> uint<64> {
+        let selects = uint_to_bits(self.mask());
+        let a = uint_to_bits(a);
+        let b = uint_to_bits(b);
+        let byte7 = bits_to_uint(if selects[7] a[0:8]   else b[0:8]  );
+        let byte6 = bits_to_uint(if selects[6] a[8:16]  else b[8:16] );
+        let byte5 = bits_to_uint(if selects[5] a[16:24] else b[16:24]);
+        let byte4 = bits_to_uint(if selects[4] a[24:32] else b[24:32]);
+        let byte3 = bits_to_uint(if selects[3] a[32:40] else b[32:40]);
+        let byte2 = bits_to_uint(if selects[2] a[40:48] else b[40:48]);
+        let byte1 = bits_to_uint(if selects[1] a[48:56] else b[48:56]);
+        let byte0 = bits_to_uint(if selects[0] a[56:64] else b[56:64]);
+
+        byte0 `concat` byte1 `concat` byte2 `concat` byte3 `concat` byte4 `concat` byte5 `concat` byte6 `concat` byte7
     }
 
     fn clear(self, dest: uint<64>) -> uint<64> {
@@ -56,19 +108,24 @@ fn null_mask() -> MemMask {
 
 struct DResult {
     data: uint<64>,
-    tag: uint<20>,
-    valid: bool,
+    tag: DTag,
     busy: bool,
 }
 
 struct port DCache {
-    index: &mut Option<uint<12>>,
+    index: &mut Option<uint<10>>,
     result: &DResult,
     write: &mut uint<64>,
     write_mask: &mut Option<MemMask>,
 }
 
-pipeline(1) dcache_access(clk: clock, dcache: DCache, index: uint<12>, read_en: bool, write: (bool, uint<64>, MemMask)) -> DResult
+struct DTag {
+    tag: uint<20>,
+    valid: bool,
+    dirty: bool,
+}
+
+pipeline(1) dcache_access(clk: clock, dcache: DCache, index: uint<10>, read_en: bool, write: (bool, uint<64>, MemMask)) -> DResult
 {
         let (write_en, data, write_mask) = write;
 
@@ -77,4 +134,62 @@ pipeline(1) dcache_access(clk: clock, dcache: DCache, index: uint<12>, read_en: 
         set dcache.write_mask = if write_en Option::Some(write_mask) else Option::None;
     reg;
         *dcache.result
+}
+
+pipeline(1) dcache(clk: clock, fill: Option<(uint<11>, uint<20>, uint<64>)>) -> DCache
+{
+    let index = inst new_mut_wire();
+    let write = inst new_mut_wire();
+    let write_mask = inst new_mut_wire();
+
+    let (en, bank, line) = match inst read_mut_wire(index) {
+        Option::Some(idx) => {
+            let bank: uint<1> = trunc(idx >> 9);
+            let line: uint<9> = trunc(idx);
+
+            (true, bank, line)
+        },
+        Option::None => (false, 0, 0),
+    };
+
+
+    let (write_en, mask) = match inst read_mut_wire(write_mask) {
+        Option::Some(mask) => (true, mask),
+        Option::None => (false, null_mask()),
+    };
+
+    let (en0, en1) = match bank {
+        0 => (write_en, false),
+        1 => (false, write_en),
+    };
+
+    let w_data = inst read_mut_wire(write);
+    let w_tag = DTag$(tag: 0, valid: true, dirty: true); // TODO
+
+    let mem0: Memory<uint<64>, 512> = inst clocked_memory(clk, [(en0, line, w_data)]);
+    let mem1: Memory<uint<64>, 512> = inst clocked_memory(clk, [(en1, line, w_data)]);
+    let tag_mem: Memory<DTag, 512> = inst clocked_memory(clk, [(write_en, line, w_tag)]);
+
+    let data = match (en, bank) {
+        (false, _) => 0,
+        (true, 0) => inst read_memory(mem0, trunc(line)),
+        (true, 1) => inst read_memory(mem1, trunc(line)),
+    };
+
+    let tag = inst read_memory(tag_mem, trunc(line));
+
+reg;
+
+    let d_result = DResult$(
+        data,
+        tag,
+        busy: write_en
+    );
+
+    DCache$(
+        index: index,
+        result: &d_result,
+        write: write,
+        write_mask: write_mask
+    )
 }
