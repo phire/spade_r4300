@@ -3,7 +3,7 @@
 import cocotb
 from spade import *
 from cocotb.clock import Clock
-import sys
+from cocotb.triggers import *
 
 def RegId(id) -> str:
     if id < 32:

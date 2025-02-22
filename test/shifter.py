@@ -3,6 +3,7 @@
 import cocotb
 from spade import *
 from cocotb.clock import Clock
+from cocotb.triggers import *
 
 async def start(dut):
     s = SpadeExt(dut)

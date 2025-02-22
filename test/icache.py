@@ -3,6 +3,8 @@
 import cocotb
 from spade import *
 from cocotb.clock import Clock
+from cocotb.triggers import *
+
 
 def some(data) -> str:
     return f"Option::Some({data})"

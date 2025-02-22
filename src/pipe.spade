@@ -175,7 +175,7 @@ pipeline(5) r4200_pipeline(
 ) -> (uint<64>, PipelineResult)
 {
         let fetch_en = stage.ready;
-        reg(phase1) pc = if fetch_en stage(EX).nextpc else pc;
+        reg(phase1) pc = if fetch_en { stage(EX).nextpc } else { pc };
         'IC // Instruction Cache
         // Nothing happens in phase1 of the IC stage
         // It's waiting for the program counter to be calculated during EX phase1

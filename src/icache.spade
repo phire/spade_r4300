@@ -18,7 +18,7 @@ struct Request {
 }
 
 struct port ICache {
-    request: &mut Request,
+    request: inv &Request,
     result: &Result,
 }
 

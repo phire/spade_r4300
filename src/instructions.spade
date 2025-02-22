@@ -242,7 +242,7 @@ fn conditional(info: InstructionInfo) -> InstructionInfo {
 }
 
 
-fn only_zero<N>(val: uint<N>, info: InstructionInfo) -> InstructionInfo {
+fn only_zero<N>(val: N, info: InstructionInfo) -> InstructionInfo {
     if val == 0 { info } else { exception() }
 }
 

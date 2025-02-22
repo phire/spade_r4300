@@ -1,3 +1,8 @@
+mod icache;
+mod dcache;
+mod pipe;
+mod instructions;
+mod regfile;
 
 use lib::icache::instruction_cache;
 use lib::pipe::r4200_pipeline;

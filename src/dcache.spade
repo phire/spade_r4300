@@ -12,11 +12,11 @@ struct MemMask {
     align: uint<3>, // alignment within octbyte
 }
 
-fn chunks<#B, #N, #M>(data: uint<B>) -> [[bool; N]; M] {
+fn chunks<#uint B, #uint N, #uint M>(data: uint<B>) -> [[bool; N]; M] {
     std::conv::unsafe::unsafe_cast(data)
 }
 
-fn join<#B, #N, #M>(data: [[bool; N]; M]) -> uint<B> {
+fn join<#uint B, #uint N, #uint M>(data: [[bool; N]; M]) -> uint<B> {
     std::conv::unsafe::unsafe_cast(data)
 }
 
@@ -30,14 +30,14 @@ fn byte_mux2(selects: [bool; 8] , a: uint<64>, b: uint<64>) -> uint<64> {
     let b = chunks::<64, 8, 8>(b);
 
     join::<64, 8, 8>([
-        if s[0] a[0] else b[0],
-        if s[1] a[1] else b[1],
-        if s[2] a[2] else b[2],
-        if s[3] a[3] else b[3],
-        if s[4] a[4] else b[4],
-        if s[5] a[5] else b[5],
-        if s[6] a[6] else b[6],
-        if s[7] a[7] else b[7],
+        if s[0] { a[0] } else { b[0] },
+        if s[1] { a[1] } else { b[1] },
+        if s[2] { a[2] } else { b[2] },
+        if s[3] { a[3] } else { b[3] },
+        if s[4] { a[4] } else { b[4] },
+        if s[5] { a[5] } else { b[5] },
+        if s[6] { a[6] } else { b[6] },
+        if s[7] { a[7] } else { b[7] },
     ])
 }
 
@@ -58,14 +58,14 @@ impl MemMask {
         let selects = uint_to_bits(self.mask());
         let a = uint_to_bits(a);
         let b = uint_to_bits(b);
-        let byte7 = bits_to_uint(if selects[7] a[0:8]   else b[0:8]  );
-        let byte6 = bits_to_uint(if selects[6] a[8:16]  else b[8:16] );
-        let byte5 = bits_to_uint(if selects[5] a[16:24] else b[16:24]);
-        let byte4 = bits_to_uint(if selects[4] a[24:32] else b[24:32]);
-        let byte3 = bits_to_uint(if selects[3] a[32:40] else b[32:40]);
-        let byte2 = bits_to_uint(if selects[2] a[40:48] else b[40:48]);
-        let byte1 = bits_to_uint(if selects[1] a[48:56] else b[48:56]);
-        let byte0 = bits_to_uint(if selects[0] a[56:64] else b[56:64]);
+        let byte7 = bits_to_uint(if selects[7] { a[0:8]   } else { b[0:8]   });
+        let byte6 = bits_to_uint(if selects[6] { a[8:16]  } else { b[8:16]  });
+        let byte5 = bits_to_uint(if selects[5] { a[16:24] } else { b[16:24] });
+        let byte4 = bits_to_uint(if selects[4] { a[24:32] } else { b[24:32] });
+        let byte3 = bits_to_uint(if selects[3] { a[32:40] } else { b[32:40] });
+        let byte2 = bits_to_uint(if selects[2] { a[40:48] } else { b[40:48] });
+        let byte1 = bits_to_uint(if selects[1] { a[48:56] } else { b[48:56] });
+        let byte0 = bits_to_uint(if selects[0] { a[56:64] } else { b[56:64] });
 
         byte0 `concat` byte1 `concat` byte2 `concat` byte3 `concat` byte4 `concat` byte5 `concat` byte6 `concat` byte7
     }
@@ -98,7 +98,7 @@ impl MemMask {
 }
 
 
-fn mem_mask<N, M>(size: uint<N>, addr: uint<M>) -> MemMask {
+fn mem_mask<N, M>(size: N, addr: M) -> MemMask {
     MemMask$ (size: trunc(size - 1), align: trunc(addr))
 }
 
@@ -113,10 +113,10 @@ struct DResult {
 }
 
 struct port DCache {
-    index: &mut Option<uint<10>>,
+    index: inv &Option<uint<10>>,
     result: &DResult,
-    write: &mut uint<64>,
-    write_mask: &mut Option<MemMask>,
+    write: inv &uint<64>,
+    write_mask: inv &Option<MemMask>,
 }
 
 struct DTag {
@@ -129,9 +129,9 @@ pipeline(1) dcache_access(clk: clock, dcache: DCache, index: uint<10>, read_en: 
 {
         let (write_en, data, write_mask) = write;
 
-        set dcache.index = if read_en || write_en Option::Some(index) else Option::None;
+        set dcache.index = if read_en || write_en { Option::Some(index) } else { Option::None };
         set dcache.write = data;
-        set dcache.write_mask = if write_en Option::Some(write_mask) else Option::None;
+        set dcache.write_mask = if write_en { Option::Some(write_mask) } else { Option::None };
     reg;
         *dcache.result
 }
