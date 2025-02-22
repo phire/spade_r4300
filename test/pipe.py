@@ -29,9 +29,9 @@ class Pipeline:
             return 0xffffffff
 
     def d_index(self):
-        val = self.o.d_index.value()
-        if val.startswith("Some("):
-            return int(val[5:-1], 10)
+        if self.o.d_index_valid.value():
+            val = self.o.d_index.value()
+            return int(val, 10)
         return None
 
     def write_mask(self):
