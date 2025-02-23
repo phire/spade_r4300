@@ -136,53 +136,89 @@ pipeline(1) dcache_access(clk: clock, dcache: DCache, index: uint<10>, read_en: 
         *dcache.result
 }
 
-pipeline(1) dcache(clk: clock, fill: Option<(uint<11>, uint<20>, uint<64>)>) -> DCache
+pipeline(1) dcache(clk: clock, fill: Option<(uint<9>, uint<20>, uint<128>)>) -> DCache
 {
     let index = inst new_mut_wire();
     let write = inst new_mut_wire();
     let write_mask = inst new_mut_wire();
 
-    let (en, bank, line) = match inst read_mut_wire(index) {
-        Option::Some(idx) => {
-            let bank: uint<1> = trunc(idx >> 9);
-            let line: uint<9> = trunc(idx);
-
-            (true, bank, line)
-        },
-        Option::None => (false, 0, 0),
-    };
-
-
     let (write_en, mask) = match inst read_mut_wire(write_mask) {
-        Option::Some(mask) => (true, mask),
-        Option::None => (false, null_mask()),
+        Some(mask) => (true, mask),
+        _ => (fill.is_some(), null_mask()),
     };
+
+    let (read_en, bank, row, col) = match (fill, write_en, inst read_mut_wire(index)) {
+        (Some((idx, _, _)), _, _) => (false, trunc(idx >> 8), trunc(idx), 0),
+        (_, false, Some(idx)) => {
+            let bank: uint<1> = trunc(idx >> 9);
+            let row: uint<8> = trunc(idx >> 1);
+            let col: uint<1> = trunc(idx);
+
+            (true, bank, row, col)
+        },
+        _ => (false, stage(+1).bank, stage(+1).row, stage(+1).col),
+    };
+
+    let line = concat(bank, row);
 
     let (en0, en1) = match bank {
         0 => (write_en, false),
         1 => (false, write_en),
     };
 
-    let w_data = inst read_mut_wire(write);
-    let w_tag = DTag$(tag: 0, valid: true, dirty: true); // TODO
+    // Cache is made up of two banks, each with 256 rows of 128 bits (a full cache line)
+    let mem0: Memory<uint<128>, 256> = inst clocked_memory(clk, [(en0, row, stage(+0).mem_latch)]);
+    let mem1: Memory<uint<128>, 256> = inst clocked_memory(clk, [(en1, row, stage(+0).mem_latch)]);
 
-    let mem0: Memory<uint<64>, 512> = inst clocked_memory(clk, [(en0, line, w_data)]);
-    let mem1: Memory<uint<64>, 512> = inst clocked_memory(clk, [(en1, line, w_data)]);
-    let tag_mem: Memory<DTag, 512> = inst clocked_memory(clk, [(write_en, line, w_tag)]);
+    // TODO: this should be 88x128, with 4 tags per row.
+    let tag_mem: Memory<DTag, 512> = inst clocked_memory(clk, [(write_en, line, stage(+0).tag_latch)]);
 
-    let data = match (en, bank) {
-        (false, _) => 0,
-        (true, 0) => inst read_memory(mem0, trunc(line)),
-        (true, 1) => inst read_memory(mem1, trunc(line)),
+    // Memory latches, which hold a single cacheline (128 bits) and the tags.
+    // Well... I say this is a latch. Right now, the memory is writing the pre-latch values.
+    // This is probally because we haven't implemented the two phase clock Though I'm a little
+    // worried that will this design with a single latch will end up needing to latch on both phases
+    let (mem_latch, tag_latch) = if fill.is_some() {
+        // We are filling from the flush buffer. Load all 128 bits into the latch.
+        // set valid, clear dirty
+        match fill {
+            Some((_, tag, data)) => (data, DTag$(tag: tag, valid: true, dirty: false)),
+            _ => (stage(+1).mem_latch, stage(+1).tag_latch),
+        }
+    } else if write_en {
+        // We are writing; Mark tag as dirty
+        let tag = DTag$(tag: stage(+1).tag_latch.tag, valid: true, dirty: true);
+
+        // And update the correct 64 bits within the latch.
+        let lower = trunc(stage(+1).mem_latch);
+        let upper = trunc(stage(+1).mem_latch >> 64);
+        let w_data: uint<64> = inst read_mut_wire(write);
+
+        match col {
+            0 => (mask.byte_mux(w_data, upper) `concat` lower, tag),
+            1 => (upper `concat` mask.byte_mux(w_data, lower), tag),
+        }
+    } else if read_en {
+        // Read 128-bit cache line and tag into latch
+        let tag = inst read_memory(tag_mem, line);
+        match bank {
+            0 => (inst read_memory(mem0, row), tag),
+            1 => (inst read_memory(mem1, row), tag),
+        }
+    } else {
+        (stage(+1).mem_latch, stage(+1).tag_latch)
     };
 
-    let tag = inst read_memory(tag_mem, trunc(line));
-
 reg;
+    let data = match (read_en, col) {
+        (false, _) => 0,
+        // Physically it's taking odd and even columns... but lets simplify
+        (true, 0) => trunc(mem_latch >> 64),
+        (true, 1) => trunc(mem_latch),
+    };
 
     let d_result = DResult$(
         data,
-        tag,
+        tag: tag_latch,
         busy: write_en
     );
 
@@ -192,4 +228,21 @@ reg;
         write: write,
         write_mask: write_mask
     )
+}
+
+#[no_mangle]
+pipeline(1) test_harness(
+    clk: clock,
+    fill: Option<(uint<9>, uint<20>, uint<128>)>,
+    write: (bool, uint<64>, MemMask),
+    index: uint<10>,
+    read_en: bool
+)
+  -> DResult
+{
+        let dcache = inst(1) dcache(clk, fill);
+        let result = inst(1) dcache_access(clk, dcache, index, read_en, write);
+reg;
+
+        result
 }
