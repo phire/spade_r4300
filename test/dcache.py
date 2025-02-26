@@ -26,7 +26,7 @@ class DCache:
 
         self.i.index = 0
         self.i.fill = none()
-        self.i.write = t("false", 0, "MemMask(0, 0)")
+        self.i.write = none()
         self.i.read_en = False
         self.clk = self.dut.clk_i
 
@@ -46,6 +46,11 @@ class DCache:
         self.i.read_en = True
         await FallingEdge(self.clk)
         self.i.read_en = False
+
+    async def write(self, data):
+        self.i.write = some(data)
+        await FallingEdge(self.clk)
+        self.i.write = none()
 
 
 @cocotb.test()
@@ -82,14 +87,9 @@ async def dcache_write(dut):
     await FallingEdge(clk)
 
     # overwrite it
-    s.index = 0x18
-    s.read_en = True
-    await FallingEdge(clk)
+    await s.read(0x18)
     s.o.busy.assert_eq("false")
-    s.i.write = t("true", 0xaa00aa00bb00cc, "MemMask(7, 0)")
-    s.o.busy.assert_eq("false")
-    await FallingEdge(clk) # takes two cycles to write
-    s.i.write =  t("false", 0, "MemMask(3, 0)")
+    await s.write("0xaa00aa00bb00cc")
     s.o.busy.assert_eq("true")
 
     await FallingEdge(clk)
@@ -99,7 +99,7 @@ async def dcache_write(dut):
 
     # And read it back
     await s.read(0x18)
-    dut._log.info(f"Read data: {s.o.value()} {int(s.o.data.value()):x}")
+
     s.o.assert_eq("DResult$(data: 0xaa00aa00bb00cc, tag: DTag$(tag: 0xcab77, valid: true, dirty: true), busy: false)")
 
     await s.read(0x19)

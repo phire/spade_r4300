@@ -85,6 +85,11 @@ impl MemMask {
         (dest & ~mask) | (self.align(data) & mask)
     }
 
+    fn insert_aligned(self, dest: uint<64>, data: uint<64>) -> uint<64> {
+        let mask = self.byte_mask();
+        dest & ~mask | data & mask
+    }
+
     fn extract(self, data: uint<64>) -> uint<64> {
         let inv_size: uint<64> = 7 - zext(self.size);
         let left_shift = inv_size << 3;
@@ -115,8 +120,7 @@ struct DResult {
 struct port DCache {
     index: inv &Option<uint<10>>,
     result: &DResult,
-    write: inv &uint<64>,
-    write_mask: inv &Option<MemMask>,
+    write: inv &Option<uint<64>>,
 }
 
 struct DTag {
@@ -125,31 +129,14 @@ struct DTag {
     dirty: bool,
 }
 
-pipeline(1) dcache_access(clk: clock, dcache: DCache, index: uint<10>, read_en: bool, write: (bool, uint<64>, MemMask)) -> DResult
-{
-        let (write_en, data, write_mask) = write;
-
-        set dcache.index = if read_en || write_en { Option::Some(index) } else { Option::None };
-        set dcache.write = data;
-        set dcache.write_mask = if write_en { Option::Some(write_mask) } else { Option::None };
-    reg;
-        *dcache.result
-}
-
 pipeline(1) dcache(clk: clock, fill: Option<(uint<9>, uint<20>, uint<128>)>) -> DCache
 {
     let index = inst new_mut_wire();
     let write = inst new_mut_wire();
-    let write_mask = inst new_mut_wire();
 
-    let (write_en, mask) = match inst read_mut_wire(write_mask) {
-        Some(mask) => (true, mask),
-        _ => (fill.is_some(), null_mask()),
-    };
-
-    let (read_en, bank, row, col) = match (fill, write_en, inst read_mut_wire(index)) {
+    let (read_en, bank, row, col) = match (fill, inst read_mut_wire(write), inst read_mut_wire(index)) {
         (Some((idx, _, _)), _, _) => (false, trunc(idx >> 8), trunc(idx), 0),
-        (_, false, Some(idx)) => {
+        (_, None, Some(idx)) => {
             let bank: uint<1> = trunc(idx >> 9);
             let row: uint<8> = trunc(idx >> 1);
             let col: uint<1> = trunc(idx);
@@ -161,43 +148,40 @@ pipeline(1) dcache(clk: clock, fill: Option<(uint<9>, uint<20>, uint<128>)>) -> 
 
     let line = concat(bank, row);
 
+    let (write_en, write_data, write_tag) = match (fill, inst read_mut_wire(write)) {
+        (Some((_, tag, data)), _) => {
+            // We are filling from the flush buffer, write all 128 bits.
+            // Set tag with valid, clear dirty
+            (true, data, DTag$(tag: tag, valid: true, dirty: false))
+        },
+        (_, Some(data)) => {
+            // We are writing; Mark tag as dirty
+            let tag = DTag$(tag: stage(+1).tag_latch.tag, valid: true, dirty: true);
+            let latch = stage(+1).mem_latch;
+
+            match col {
+                0 => (true, data `concat` trunc(latch), tag),
+                1 => (true, trunc(latch >> 64) `concat` data, tag),
+            }
+        },
+        _ => (false, stage(+1).mem_latch, stage(+1).tag_latch),
+    };
+
     let (en0, en1) = match bank {
         0 => (write_en, false),
         1 => (false, write_en),
     };
 
     // Cache is made up of two banks, each with 256 rows of 128 bits (a full cache line)
-    let mem0: Memory<uint<128>, 256> = inst clocked_memory(clk, [(en0, row, stage(+0).mem_latch)]);
-    let mem1: Memory<uint<128>, 256> = inst clocked_memory(clk, [(en1, row, stage(+0).mem_latch)]);
+    let mem0: Memory<uint<128>, 256> = inst clocked_memory(clk, [(en0, row, write_data)]);
+    let mem1: Memory<uint<128>, 256> = inst clocked_memory(clk, [(en1, row, write_data)]);
 
     // TODO: this should be 88x128, with 4 tags per row.
-    let tag_mem: Memory<DTag, 512> = inst clocked_memory(clk, [(write_en, line, stage(+0).tag_latch)]);
+    let tag_mem: Memory<DTag, 512> = inst clocked_memory(clk, [(write_en, line, write_tag)]);
 
     // Memory latches, which hold a single cacheline (128 bits) and the tags.
     // Well... I say this is a latch. Right now, the memory is writing the pre-latch values.
-    // This is probally because we haven't implemented the two phase clock Though I'm a little
-    // worried that will this design with a single latch will end up needing to latch on both phases
-    let (mem_latch, tag_latch) = if fill.is_some() {
-        // We are filling from the flush buffer. Load all 128 bits into the latch.
-        // set valid, clear dirty
-        match fill {
-            Some((_, tag, data)) => (data, DTag$(tag: tag, valid: true, dirty: false)),
-            _ => (stage(+1).mem_latch, stage(+1).tag_latch),
-        }
-    } else if write_en {
-        // We are writing; Mark tag as dirty
-        let tag = DTag$(tag: stage(+1).tag_latch.tag, valid: true, dirty: true);
-
-        // And update the correct 64 bits within the latch.
-        let lower = trunc(stage(+1).mem_latch);
-        let upper = trunc(stage(+1).mem_latch >> 64);
-        let w_data: uint<64> = inst read_mut_wire(write);
-
-        match col {
-            0 => (mask.byte_mux(w_data, upper) `concat` lower, tag),
-            1 => (upper `concat` mask.byte_mux(w_data, lower), tag),
-        }
-    } else if read_en {
+    let (mem_latch, tag_latch) = if read_en {
         // Read 128-bit cache line and tag into latch
         let tag = inst read_memory(tag_mem, line);
         match bank {
@@ -226,7 +210,6 @@ reg;
         index: index,
         result: &d_result,
         write: write,
-        write_mask: write_mask
     )
 }
 
@@ -234,15 +217,16 @@ reg;
 pipeline(1) test_harness(
     clk: clock,
     fill: Option<(uint<9>, uint<20>, uint<128>)>,
-    write: (bool, uint<64>, MemMask),
+    write: Option<uint<64>>,
     index: uint<10>,
     read_en: bool
 )
   -> DResult
 {
         let dcache = inst(1) dcache(clk, fill);
-        let result = inst(1) dcache_access(clk, dcache, index, read_en, write);
+        set dcache.index = if read_en { Option::Some(index) } else { Option::None };
+        set dcache.write = write;
 reg;
 
-        result
+        *dcache.result
 }

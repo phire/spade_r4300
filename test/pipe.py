@@ -30,22 +30,13 @@ class Pipeline:
             return 0xffffffff
 
     def d_index(self):
-        if self.o.d_index_valid.value():
+        if self.o.d_index_valid.value() == "true":
             val = self.o.d_index.value()
             return int(val, 10)
         return None
 
-    def write_mask(self):
-        if self.o.write_en.value() == "true":
-            size = int(self.o.write_mask.size.value())
-            align = int(self.o.write_mask.align.value())
-            left = ((7 - size) - align) << 3
-            return (0xffffffff_ffffffff >> ((7 - size) << 3)) << left
-
-        return None
-
-    def w_mask_details(self):
-        return self.o.write_mask.size.value(), self.o.write_mask.align.value(), self.o.write_en.value()
+    def is_write(self):
+        return self.o.write_en.value() == "true"
 
     def write(self):
         try:
@@ -219,11 +210,16 @@ async def do_stores(p, prog, dut, loads=dict()):
         p.set_inst(inst)
         await p.clock()
 
-        dut._log.info(f"index: {p.index():04x}, inst: {inst:08x}, mask: {p.w_mask_details()}")
+        dut._log.info(f"index: {p.index():04x}, inst: {inst:08x}, status: {p.status()}")
 
-        if p.write_mask() is not None:
-            dut._log.info(f"writing: {p.write():x} to {open_row << 3:x} with mask: {p.write_mask():x}")
-            writes.append((open_row, p.write_mask(), p.write()))
+        assert p.status() in ["Ok()", "Stall(LoadInterlock())"]
+
+        if p.is_write():
+            if open_row is None:
+                dut._log.info(f"writing: {p.write():x} after row closed")
+            else:
+                dut._log.info(f"writing: {p.write():x} to {open_row << 3:x}")
+                writes.append((open_row, p.write()))
 
         index = p.d_index()
 
@@ -232,19 +228,17 @@ async def do_stores(p, prog, dut, loads=dict()):
             try:
                 p.i.data = hex(loads[index << 3])
             except:
-                p.i.data = "0x55aa55aa55aa55aa"
+                p.i.data = "0x1122334455667788"
             p.i.d_tag = "0"
             p.i.d_valid = "true"
             open_row = p.d_index()
         else:
-            open_row = None
+            #open_row = None
             p.i.d_valid = "false"
             p.i.data = "0"
             p.i.d_tag = "0"
 
     raise Exception("Timeout")
-
-
 
 @cocotb.test()
 async def store_word(dut):
@@ -255,7 +249,10 @@ async def store_word(dut):
         lui(7, 0xdead),
         ori(7, 7, 0xbeef),
         itype(0b101011, 0, 7, 0x0044), # sw $r7, 0x44($zero)
+        nop(),
         itype(0b101011, 0, 7, 0x0268), # sw $r7, 0x268($zero)
+        nop(),
+        nop(),
         nop(),
         nop(),
     ]
@@ -264,17 +261,17 @@ async def store_word(dut):
 
     assert writes, "No write found"
 
-    row, mask, data = writes[0]
+    row, data = writes[0]
     addr = row << 3
+    dut._log.info(f"word: {addr}, data: {data:x}")
     assert addr == 0x40
-    assert mask == 0x00000000ffffffff
-    assert data & mask == 0x00000000deadbeef
+    assert data == 0x11223344deadbeef
 
-    row, mask, data = writes[1]
+    row, data = writes[1]
     addr = row << 3
+    dut._log.info(f"word: {addr}, data: {data:x}")
     assert addr == 0x268
-    assert mask == 0xffffffff00000000
-    assert data & mask == 0xdeadbeef00000000
+    assert data == 0xdeadbeef55667788
 
 @cocotb.test()
 async def store_byte(dut):
@@ -294,6 +291,7 @@ async def store_byte(dut):
         itype(0b101000, 0, 7, 0x57), # sb $r7, 0x57($zero)
         nop(),
         nop(),
+        nop(),
     ]
 
     writes = await do_stores(p, prog, dut)
@@ -301,11 +299,14 @@ async def store_byte(dut):
     assert writes, "No write found"
 
     for i in range(8):
-        row, mask, data = writes[i]
-        dut._log.info(f"byte: {i}, mask: {mask:x}, data: {data:x}")
+        row, data = writes[i]
+        dut._log.info(f"byte: {i}, data: {data:x}")
+
+        mask = 0xff000000_00000000 >> (i * 8)
+        expected = 0x1122334455667788 & ~mask | (0xef000000_00000000 >> (i * 8))
+
         assert row << 3 == 0x50
-        assert mask == (0xff000000_00000000 >> (i * 8))
-        assert (data & mask) == (0xef000000_00000000 >> (i * 8))
+        assert data == expected
 
 @cocotb.test()
 async def load_word(dut):
@@ -328,12 +329,12 @@ async def load_word(dut):
 
     assert writes, "No write found"
 
-    row, mask, data = writes[0]
+    row, data = writes[0]
     addr = row << 3
-    dut._log.info(f"addr: {addr:x}, mask: {mask:x}, data: {data:x}")
+    dut._log.info(f"addr: {addr:x}, data: {data:x}")
     assert addr == 0x70
-    assert mask == 0x00000000ffffffff
-    assert data & mask == 0x00000000fccffccf
+    #assert mask == 0x00000000ffffffff
+    assert data == 0x11223344fccffccf
 
 @cocotb.test()
 async def load_interlock(dut):
@@ -356,10 +357,10 @@ async def load_interlock(dut):
 
     assert writes, "No write found"
 
-    row, mask, data = writes[0]
+    row, data = writes[0]
     addr = row << 3
-    dut._log.info(f"addr: {addr:x}, mask: {mask:x}, data: {data:x}")
-    assert data & mask == 0x00000000fccffccf
+    dut._log.info(f"addr: {addr:x}, data: {data:x}")
+    assert data & 0xffffffff == 0xfccffccf
 
 @cocotb.test()
 async def bypassing(dut):
@@ -386,13 +387,14 @@ async def bypassing(dut):
         itype(0b101011, 0, 9, 0x54), # sw $r7, 0x54($zero)
         nop(),
         nop(),
+        nop(),
     ]
 
     writes = await do_stores(p, prog, dut)
     for i in range(8):
-        row, mask, data = writes[i]
-        dut._log.info(f"byte: {i}, mask: {mask:x}, data: {data:x}")
-        assert data & mask == 0xdeadbeef, f"for write {i} Expected 0xdeadbeef, found: {data:x}"
+        row, data = writes[i]
+        dut._log.info(f"byte: {i}, data: {data:x}")
+        assert data & 0xffffffff == 0xdeadbeef, f"for write {i} Expected 0xdeadbeef, found: {data:x}"
 
 @cocotb.test()
 async def icache(dut):
