@@ -138,9 +138,13 @@ async def test_pc(dut):
 
     # reset vector
     pc = 0xffffffffbfc00000
+    dut._log.info(f"pc: {p.next_pc():x} index: {p.index()}")
 
     assert p.next_pc() == pc
     p.set_inst(0)
+    # It takes 2 extra cycles for the reset to clear
+    # wait.... that doesn't seem right
+    await p.clock()
     await p.clock()
 
     # check that pc increments starting from reset vector
@@ -150,6 +154,7 @@ async def test_pc(dut):
         dut._log.info(f"pc: {p.next_pc():x} index: {p.index()}")
         assert p.next_pc() == pc
         pc = p.next_pc() + 4
+    assert False
 
 @cocotb.test()
 async def loop(dut):

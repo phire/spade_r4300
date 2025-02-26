@@ -32,7 +32,9 @@ enum Compare {
 
 enum Trap {
     None,
-    Always,
+    Reserved,
+    Unimplemented,
+    Syscall,
     Carry,
     SignedCarry,
     NotCarry,
@@ -387,7 +389,13 @@ fn decode_special(ins: uint<32>) -> InstructionInfo {
         )),
         0b001010 => exception(),
         0b001011 => exception(),
-        0b001100 => unimplemented(), // SYSCALL
+        0b001100 => InstructionInfo$ ( // SYSCALL
+            regfile_mode: RegfileMode::Nop,
+            rf_muxing: RFMuxing::RsRt,
+            ex_mode: ExMode::Nop,
+            exception: Trap::Syscall,
+            mem_mode: MemMode::Nop,
+        ),
         0b001101 => unimplemented(), // BREAK
         0b001111 => InstructionInfo$ ( // SYNC
             regfile_mode: RegfileMode::Nop,
@@ -498,7 +506,7 @@ fn exception() -> InstructionInfo {
         regfile_mode: RegfileMode::Nop,
         rf_muxing: RFMuxing::RsRt,
         ex_mode: ExMode::Nop,
-        exception: Trap::Always,
+        exception: Trap::Reserved,
         mem_mode: MemMode::Nop,
     )
 }
@@ -508,7 +516,7 @@ fn unimplemented() -> InstructionInfo {
         regfile_mode: RegfileMode::Nop,
         rf_muxing: RFMuxing::RsRt,
         ex_mode: ExMode::Nop,
-        exception: Trap::Always,
+        exception: Trap::Unimplemented,
         mem_mode: MemMode::Nop,
     )
 }

@@ -159,9 +159,22 @@ enum Interlock{
     Coprocessor0Bypass,
 }
 
+enum Exception {
+    None,
+    Reset,
+    Nmi,
+    DataTLBMiss,
+    DataTLBInvalid,
+    DataTLBModification,
+    ReservedInstruction,
+    Unimplemented,
+    Syscall,
+}
+
 enum PipelineResult {
     Ok,
     Reset,
+    ExceptionWB{exception: Exception},
     Stall{interlock: Interlock},
 }
 
@@ -191,6 +204,9 @@ pipeline(5) r4200_pipeline(
         // todo: micro-TLB read
         let expected_itag = trunc(pc >> 12);
 
+        // flushes propergate backwards
+        let flush = stage(EX).ex_flushing || stage(DC).dc_flushing;
+
     reg;
         'RF // Register File
 
@@ -210,6 +226,15 @@ pipeline(5) r4200_pipeline(
 
         let write = stage(WB).regfile_write;
         let (rs_read, rt_read) = inst(1) regfile$(phase2, phase1, rs, rt, en_s, en_t, write);
+
+        // TODO: IADE / ITLB / IBE exceptions
+        //       I'm not sure these even happen in the RF stage. The documentation says they do,
+        //       but it's possible anything that misses the microTLB actually injects a false
+        //       load instruction into the pipeline, which then gets handled as a regular data
+        //       load.
+        let current_exception = Exception::None;
+
+        let flush = flush || stage(EX).ex_flushing || stage(DC).dc_flushing;
 
         let interlock = if false {
             Interlock::InstructionTlbMiss
@@ -304,13 +329,13 @@ pipeline(5) r4200_pipeline(
 
     // Instruction Adder:
         let thispc = stage(IC).pc;
-        let reset_vector = 0xffffffff_bfc00000;
+        let bev = false;
+        let exl = false;
+        let vector_base: uint<64> = if bev { 0xffffffff_80000000 } else { 0xffffffff_bfc00200 };
         let pc_off = if branch_compare { signed_imm << 2 } else { 4 };
 
-        let nextpc = if rst {
-            reset_vector
-        } else {
-            match inst_info.ex_mode {
+        let nextpc = match (stage(WB).wb_exception, exl) {
+            (Exception::None, _) => match inst_info.ex_mode {
                 ExMode::JumpImm26 => {
                     let imm26: uint<28> = trunc(ins << 2);
                     let upper_bits: uint<36> = trunc(pc >> 28);
@@ -318,7 +343,11 @@ pipeline(5) r4200_pipeline(
                 },
                 ExMode::JumpReg => rs_val,
                 _ => trunc(thispc + pc_off),
-            }
+            },
+            (Exception::Reset, _) => trunc(vector_base - 0x200),
+            (Exception::Nmi, _) => trunc(vector_base - 0x200),
+            (Exception::DataTLBMiss, false) => vector_base,
+            _ => trunc(vector_base + 0x180),
         };
 
     // 64-bit Carry-Propagate adder:
@@ -378,6 +407,16 @@ pipeline(5) r4200_pipeline(
         // todo: pack floating point results
         let ex_result: uint<64> = result_mux;
 
+    // Exceptions/Interlocks:
+        let (ex_flushing, current_exception) = match inst_info.exception {
+            Trap::Reserved => (true, Exception::ReservedInstruction),
+            Trap::Syscall => (true, Exception::Syscall),
+            Trap::Unimplemented => (true, Exception::Unimplemented),
+            // TODO: implement the rest of the traps
+            _ => (false, current_exception),
+        };
+        let flush = flush || ex_flushing || stage(DC).dc_flushing;
+
         let interlock = if load_interlock {
             Interlock::LoadInterlock
         } else if false {
@@ -404,6 +443,7 @@ pipeline(5) r4200_pipeline(
         let tag_matched = dcache_access.tag.tag == expected_tag;
         let valid = dcache_access.tag.valid;
         let dcache_miss = dcache_en && !(valid && tag_matched);
+        let write_blocked = dcache_write_en && !dcache_access.tag.dirty;
 
         let write_data = if dcache_write_en { mask.insert_aligned(read_data, ex_result) } else { 0 };
 
@@ -422,6 +462,22 @@ pipeline(5) r4200_pipeline(
             MemMode::ConditionalStore => 1,
         };
 
+        let (dc_flushing, current_exception) = if rst {
+            (true, Exception::Reset)
+        // } else if false {
+        //     (true, Exception::Nmi)
+        // } else if !tag_matched {
+        //     (true, Exception::DataTLBMiss)
+        // } else if !valid {
+        //     (true, Exception::DataTLBInvalid)
+        // } else if write_blocked {
+        //     (true, Exception::DataTLBModification)
+        } else {
+            (false, current_exception)
+        };
+
+        let flush = dc_flushing || flush;
+
         let interlock = if dcache_miss && !external {
             Interlock::DataCacheMiss
         } else if dcache_access.busy {
@@ -435,10 +491,13 @@ pipeline(5) r4200_pipeline(
     reg;
         'WB // Writeback
 
+        let en = !flush && stage.ready;
+        let wb_exception = current_exception;
+
         // directly access the dc_result reg, otherwise it would be delayed a cycle
-        let regfile_write = (dest, stage(-1).dc_result);
-        set dcache.write = if dcache_write_en && !external { Some(write_data) } else { None };
-        let external_write = ExternalRequest$(addr: concat(0, external_addr), data: ex_result, size: mask.size, write: dcache_write_en && external);
+        let regfile_write = (if en { dest } else { RegId::Integer(0) }, stage(-1).dc_result);
+        set dcache.write = if dcache_write_en && !external && en { Some(write_data) } else { None };
+        let external_write = ExternalRequest$(addr: concat(0, external_addr), data: ex_result, size: mask.size, write: dcache_write_en && external && en);
 
         let interlock = if false {
             Interlock::Coprocessor0Bypass
@@ -451,11 +510,11 @@ pipeline(5) r4200_pipeline(
             _ => true,
         };
 
-    reg[rst || !stall];
-        let status = match (false, stage(-1).interlock) {
-            (true, _) => PipelineResult::Reset,
-            (false, Interlock::None) => PipelineResult::Ok,
-            (false, reason) => PipelineResult::Stall(reason),
+    reg[rst || !stall || flush];
+        let status = match (stage(WB).interlock, stage(WB).current_exception) {
+            (Interlock::None, Exception::None) => PipelineResult::Ok,
+            (reason, Exception::None) => PipelineResult::Stall(reason),
+            (_, reason) => PipelineResult::ExceptionWB(reason),
         };
         (stage(IC).pc, status, stage(WB).external_write)
 }
