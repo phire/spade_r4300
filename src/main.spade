@@ -7,30 +7,27 @@ mod regfile;
 use lib::icache::instruction_cache;
 use lib::pipe::r4200_pipeline;
 use lib::pipe::PipelineResult;
-
-use lib::dcache::DResult;
-use lib::dcache::DCache;
-use lib::dcache::DTag;
+use lib::pipe::ExternalRequest;
 
 use std::ports::new_mut_wire;
 
-entity cpu(phase2: clock, phase1: clock, rst: bool, icache_write: Option<(uint<11>, uint<20>, uint<64>)>) -> PipelineResult {
+struct Result {
+    pc: uint<64>,
+    status: PipelineResult,
+    external: ExternalRequest
+}
 
-    // fake dcache (for now)
-    let d_result = DResult$(data: 0, tag: DTag$(tag: 0, valid: false, dirty: false), busy: false);
-    let d_index = inst new_mut_wire();
-    let d_write = inst new_mut_wire();
-    let d_write_mask = inst new_mut_wire();
-
-    let dcache = DCache$(
-        index: d_index,
-        result: &d_result,
-        write: d_write,
-        write_mask: d_write_mask,
-    );
-
+entity cpu(
+    phase2: clock,
+    phase1: clock,
+    rst: bool,
+    icache_write: Option<(uint<11>, uint<20>, uint<64>)>,
+    dcache_write: Option<(uint<9>, uint<20>, uint<128>)>
+) -> Result
+{
     let icache = inst(1) instruction_cache(phase1, icache_write);
-    let (pc, status) = inst(5) r4200_pipeline(phase2, phase1, rst, icache, dcache);
+    let dcache = inst(1) dcache::dcache(phase2, dcache_write);
+    let (pc, status, external) = inst(5) r4200_pipeline(phase2, phase1, rst, icache, dcache);
 
-    status
+    Result$(pc, status, external)
 }
