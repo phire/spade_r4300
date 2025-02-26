@@ -165,20 +165,29 @@ enum PipelineResult {
     Stall{interlock: Interlock},
 }
 
+struct ExternalRequest {
+    addr: uint<32>,
+    data: uint<64>,
+    size: uint<3>,
+    write: bool,
+}
+
 pipeline(5) r4200_pipeline(
     phase2: clock,
     phase1: clock,
     rst: bool,
     icache: ICache,
     dcache: DCache
-) -> (uint<64>, PipelineResult)
+) -> (uint<64>, PipelineResult, ExternalRequest)
 {
         let fetch_en = stage.ready;
         reg(phase1) pc = if fetch_en { stage(EX).nextpc } else { pc };
         'IC // Instruction Cache
         // Nothing happens in phase1 of the IC stage
         // It's waiting for the program counter to be calculated during EX phase1
+
         let (ins, itag, valid) = inst(1) icache_read(phase1, icache, fetch_en, pc);
+
         // todo: micro-TLB read
         let expected_itag = trunc(pc >> 12);
 
@@ -386,6 +395,8 @@ pipeline(5) r4200_pipeline(
 
         // TODO: Get real tag from TLB
         let expected_tag: uint<20> = trunc(data_virtual_address >> 12);
+        let external = data_virtual_address & 0xe0000000 == 0xa0000000;
+        let external_addr: uint<29> = trunc(data_virtual_address);
 
         let dcache_access = *dcache.result;
         let read_data = dcache_access.data;
@@ -411,7 +422,7 @@ pipeline(5) r4200_pipeline(
             MemMode::ConditionalStore => 1,
         };
 
-        let interlock = if dcache_miss {
+        let interlock = if dcache_miss && !external {
             Interlock::DataCacheMiss
         } else if dcache_access.busy {
             Interlock::DataCacheBusy
@@ -426,7 +437,8 @@ pipeline(5) r4200_pipeline(
 
         // directly access the dc_result reg, otherwise it would be delayed a cycle
         let regfile_write = (dest, stage(-1).dc_result);
-        set dcache.write = if dcache_write_en && !dcache_miss { Some(write_data) } else { None };
+        set dcache.write = if dcache_write_en && !external { Some(write_data) } else { None };
+        let external_write = ExternalRequest$(addr: concat(0, external_addr), data: ex_result, size: mask.size, write: dcache_write_en && external);
 
         let interlock = if false {
             Interlock::Coprocessor0Bypass
@@ -445,7 +457,7 @@ pipeline(5) r4200_pipeline(
             (false, Interlock::None) => PipelineResult::Ok,
             (false, reason) => PipelineResult::Stall(reason),
         };
-        (stage(IC).pc, status)
+        (stage(IC).pc, status, stage(WB).external_write)
 }
 
 pipeline(1) test_adder(clk: clock, mode: ExMode, x: uint<64>, y: uint<64>) -> uint<64>
@@ -471,6 +483,7 @@ struct TestResult {
     write: uint<64>,
     write_en: bool,
     status: PipelineResult,
+    external: ExternalRequest,
 }
 
 pipeline(5) test_pipeline(
@@ -509,7 +522,7 @@ pipeline(5) test_pipeline(
     );
 
     // instantiate the pipeline
-    let (next_pc, status) = inst(5) r4200_pipeline(phase2, phase1, rst, icache, dcache);
+    let (next_pc, status, external) = inst(5) r4200_pipeline(phase2, phase1, rst, icache, dcache);
 
 reg * 5;
 
@@ -523,5 +536,5 @@ reg * 5;
         Option::None => (0, false),
     };
 
-    TestResult$(next_pc, index, fetch_en, write, write_en, d_index, d_index_valid, status)
+    TestResult$(next_pc, index, fetch_en, write, write_en, d_index, d_index_valid, status, external)
 }

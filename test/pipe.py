@@ -148,7 +148,7 @@ async def test_pc(dut):
         p.set_inst(nop(i))
         await p.clock()
         dut._log.info(f"pc: {p.next_pc():x} index: {p.index()}")
-        #assert p.next_pc() == pc
+        assert p.next_pc() == pc
         pc = p.next_pc() + 4
 
 @cocotb.test()
@@ -475,3 +475,26 @@ async def dcache_miss(dut):
 
     # and then comes out of miss
     assert p.status() == "Ok()"
+
+@cocotb.test()
+async def external_write(dut):
+    p = Pipeline(dut)
+    await p.start()
+
+    prog = [
+        lui(2, 0xa000),
+        lui(7, 0xdead),
+        ori(7, 7, 0xbeef),
+        itype(0b101011, 2, 7, 0x0044), # sw $r7, 0x44($r2)
+        nop(),
+        nop(),
+        nop(),
+    ]
+
+    for inst in prog:
+        p.set_inst(inst)
+        await p.clock()
+
+    dut._log.info(f"{p.status()} {p.o.external.addr.value()}")
+
+    p.o.external.assert_eq("ExternalRequest$(addr: 0x44, data: 0xffffffffdeadbeef, size: 3, write: true)")
