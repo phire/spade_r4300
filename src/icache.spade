@@ -64,14 +64,13 @@ pipeline(1) instruction_cache(clk: clock, write: Option<(uint<11>, uint<20>, uin
         let read_addr: uint<12> = trunc(read_index >> 1);
         let read_bank: uint<2> = trunc(read_addr >> 9);
 
-        reg(clk) prefeteched_addr = read_addr;
-        reg(clk) prefetch_invalid = write_enable; // Make sure we invalidate the prefetch on any write
+        let current_buffer_tag = stage(+0).buffer_tag;
 
         // Additionally, there is a 64-bit "Instruction prefetch buffer"
         // It holds two sequential instructions, fetched as a single read from the cache bank.
         // It lowers the icache access frequency by almost 50%.
         // Source:  https://youtu.be/nll5MWlG7q4?t=680
-        let read_enable = !write_enable && ( prefeteched_addr != read_addr || prefetch_invalid) && en;
+        let read_enable = !write_enable && current_buffer_tag != concat(0, read_addr) && en;
         let mem_read_data = if read_enable {
             match read_bank {
                 0 => inst read_memory(mem0, trunc(read_addr)),
@@ -83,9 +82,16 @@ pipeline(1) instruction_cache(clk: clock, write: Option<(uint<11>, uint<20>, uin
             0 // Emulate single-port memory
         };
 
-        reg(clk) prefetch_buffer = if read_enable { mem_read_data } else { prefetch_buffer };
+        reg(clk) fetch_buffer = if read_enable { mem_read_data } else { fetch_buffer };
+        reg(clk) buffer_tag: uint<13> = if read_enable {
+                concat(0, read_addr) // concat an extra bit for validness
+            } else if write_enable {
+                0x1fff // invalidate the fetchbuffer on any write
+            } else {
+                buffer_tag
+            };
 
-        let read_data = trunc((if read_enable { mem_read_data } else { prefetch_buffer }) >> (read_word * 32));
+        let read_data = trunc((if read_enable { mem_read_data } else { fetch_buffer }) >> (read_word * 32));
 
         // And then there is a separate SRAM block for tags. Only write it when we get the last
         // word of the cacheline
