@@ -166,9 +166,6 @@ async def mask_bytemux(dut):
             dut._log.info(f"aligned result: {int(s.o.value()):016x}, expected: {expected:016x}")
             assert hex(int(s.o.value())) == hex(expected)
 
-    assert False
-
-
 @cocotb.test()
 async def mask_bytemux2(dut):
     s = SpadeExt(dut)
@@ -190,5 +187,3 @@ async def mask_bytemux2(dut):
             dut._log.info(f"size: {size+1}, align: {align}, mask: {mask:016x}")
             dut._log.info(f"aligned result: {int(s.o.value()):016x}, expected: {expected:016x}")
             assert hex(int(s.o.value())) == hex(expected)
-
-    assert False
