@@ -81,6 +81,7 @@ class Pipeline:
         self.i.data = "0"
         self.i.d_tag = "0"
         self.i.d_valid = "false"
+        self.set_inst(0)
 
         for _ in range(10):
             await self.clock()
@@ -142,19 +143,14 @@ async def test_pc(dut):
 
     assert p.next_pc() == pc
     p.set_inst(0)
-    # It takes 2 extra cycles for the reset to clear
-    # wait.... that doesn't seem right
-    await p.clock()
-    await p.clock()
 
     # check that pc increments starting from reset vector
     for i in range(20):
         p.set_inst(nop(i))
+        pc = p.next_pc() + 4
         await p.clock()
         dut._log.info(f"pc: {p.next_pc():x} index: {p.index()}")
         assert p.next_pc() == pc
-        pc = p.next_pc() + 4
-    assert False
 
 @cocotb.test()
 async def loop(dut):
@@ -217,7 +213,7 @@ async def do_stores(p, prog, dut, loads=dict()):
 
         dut._log.info(f"index: {p.index():04x}, inst: {inst:08x}, status: {p.status()}")
 
-        assert p.status() in ["Ok()", "Stall(LoadInterlock())"]
+        assert p.status() in ["Ok()", "Stall(LoadInterlock())", "ExceptionWB(Reset())"]
 
         if p.is_write():
             if open_row is None:
@@ -446,15 +442,13 @@ async def dcache_miss(dut):
             raise Exception("Timeout")
         timeout -= 1
 
+    assert p.fetch_en() and p.index() == 0
 
-    assert p.index() == 0
-
-    # TODO: implement dcache miss test
     p.set_inst(itype(0b101011, 0, 0, 0x54)) # sw $zero, 0x54($zero)
 
     await p.clock()
     await p.halfclock()
-    assert p.fetch_en() and p.index() == 0
+    assert p.fetch_en() and p.index() == 1
 
     p.set_inst(nop())
     assert p.status() == "Ok()"
@@ -469,7 +463,7 @@ async def dcache_miss(dut):
     for i in range(10):
         await p.clock()
         assert p.status() == "Stall(DataCacheMiss())"
-        assert p.index() == 1
+        assert p.index() == 2
         assert not p.fetch_en()
 
     p.i.d_valid = "true"
@@ -499,7 +493,6 @@ async def external_write(dut):
     for inst in prog:
         p.set_inst(inst)
         await p.clock()
-
-    dut._log.info(f"{p.status()} {p.o.external.addr.value()}")
+        dut._log.info(f"{p.status()} {int(p.o.external.addr.value()):x} {int(p.o.external.data.value()):x}")
 
     p.o.external.assert_eq("ExternalRequest$(addr: 0x44, data: 0xffffffffdeadbeef, size: 3, write: true)")

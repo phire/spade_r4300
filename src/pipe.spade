@@ -232,7 +232,7 @@ pipeline(5) r4200_pipeline(
         //       but it's possible anything that misses the microTLB actually injects a false
         //       load instruction into the pipeline, which then gets handled as a regular data
         //       load.
-        let current_exception = Exception::None;
+        let rf_exception = Exception::None;
 
         let flush = flush || stage(EX).ex_flushing || stage(DC).dc_flushing;
 
@@ -332,9 +332,15 @@ pipeline(5) r4200_pipeline(
         let bev = false;
         let exl = false;
         let vector_base: uint<64> = if bev { 0xffffffff_80000000 } else { 0xffffffff_bfc00200 };
-        let pc_off = if branch_compare { signed_imm << 2 } else { 4 };
+        let pc_off = if flush || !branch_compare { 4 } else { signed_imm << 2 };
 
-        let nextpc = match (stage(WB).wb_exception, exl) {
+        let exception = match (stage(WB).dc_exception, stage(EX).ex_exception, stage(RF).rf_exception) {
+            (Exception::None, Exception::None, reason) => reason,
+            (Exception::None, reason, _) => reason,
+            (reason, _, _) => reason,
+        };
+
+        let nextpc = match (exception, exl) {
             (Exception::None, _) => match inst_info.ex_mode {
                 ExMode::JumpImm26 => {
                     let imm26: uint<28> = trunc(ins << 2);
@@ -408,12 +414,12 @@ pipeline(5) r4200_pipeline(
         let ex_result: uint<64> = result_mux;
 
     // Exceptions/Interlocks:
-        let (ex_flushing, current_exception) = match inst_info.exception {
+        let (ex_flushing, ex_exception) = match inst_info.exception {
             Trap::Reserved => (true, Exception::ReservedInstruction),
             Trap::Syscall => (true, Exception::Syscall),
             Trap::Unimplemented => (true, Exception::Unimplemented),
             // TODO: implement the rest of the traps
-            _ => (false, current_exception),
+            _ => (false, Exception::None),
         };
         let flush = flush || ex_flushing || stage(DC).dc_flushing;
 
@@ -462,7 +468,7 @@ pipeline(5) r4200_pipeline(
             MemMode::ConditionalStore => 1,
         };
 
-        let (dc_flushing, current_exception) = if rst {
+        let (dc_flushing, dc_exception) = if stage(IC).rst {
             (true, Exception::Reset)
         // } else if false {
         //     (true, Exception::Nmi)
@@ -473,7 +479,7 @@ pipeline(5) r4200_pipeline(
         // } else if write_blocked {
         //     (true, Exception::DataTLBModification)
         } else {
-            (false, current_exception)
+            (false, Exception::None)
         };
 
         let flush = dc_flushing || flush;
@@ -492,7 +498,6 @@ pipeline(5) r4200_pipeline(
         'WB // Writeback
 
         let en = !flush && stage.ready;
-        let wb_exception = current_exception;
 
         // directly access the dc_result reg, otherwise it would be delayed a cycle
         let regfile_write = (if en { dest } else { RegId::Integer(0) }, stage(-1).dc_result);
@@ -511,7 +516,7 @@ pipeline(5) r4200_pipeline(
         };
 
     reg[rst || !stall || flush];
-        let status = match (stage(WB).interlock, stage(WB).current_exception) {
+        let status = match (stage(WB).interlock, stage(EX).exception) {
             (Interlock::None, Exception::None) => PipelineResult::Ok,
             (reason, Exception::None) => PipelineResult::Stall(reason),
             (_, reason) => PipelineResult::ExceptionWB(reason),

@@ -24,6 +24,15 @@ class Core:
     def status(self):
         return self.o.status.value()
 
+    def external_write(self):
+        if self.o.external.write == False:
+            return None
+        addr = int(self.o.external.addr.value())
+        size = 1 + int(self.o.external.size.value())
+        mask = (1 << size * 8) - 1
+        data = int(self.o.external.data.value())
+        return (addr, data & mask)
+
     async def start(self, icache, dcache):
         phase1 = self.phase1
         phase2 = self.phase2
@@ -43,12 +52,18 @@ class Core:
 
         # reset
         self.i.rst = True
+        self.i.icache_write = "None"
+        self.i.dcache_write = "None"
+
+        for _ in range(3):
+            await self.clock()
 
 
         # load data into icache
         for addr, data in icache:
             index = (addr >> 3) & 0x7ff
             tag = (addr >> 12) & 0xfffff
+            self.dut._log.info(f"writing {hex(addr)} to icache")
 
             self.i.icache_write = f"Some(({index}, {tag}, {data}))"
             await self.clock()
@@ -64,7 +79,7 @@ class Core:
             await self.clock()
 
         self.i.dcache_write = "None"
-        for _ in range(10):
+        for _ in range(5):
             await self.clock()
 
         self.i.rst = "false"
@@ -74,8 +89,6 @@ class Core:
 
     async def clock(self):
         await RisingEdge(self.phase2)
-
-
 
 def rtype(op, rs, rt, rd, sh, func):
     assert func <= 0x3f
@@ -122,19 +135,27 @@ async def core_external_write(dut):
         nop(),
         nop(),
         nop(),
+        nop(),
+        nop(),
     ]
 
     if len(prog) % 2:
         prog.append(nop())
 
     # pack into 64-bit words
-    icache = [(0xbfc00000 + i, prog[i] << 32 | (prog[i+1])) for i in range(0, len(prog), 2)]
+    icache = [(0xbfc00000 + i * 4, prog[i] << 32 | (prog[i+1])) for i in range(0, len(prog), 2)]
     dcache = [(0x00010000 + i, 0) for i in range(0, 0x100, 16)]
 
     await c.start(icache, dcache)
 
-    for _ in range(10):
-        dut._log.info(f"pc: {hex(c.next_pc())}")
+    for _ in range(20):
         await c.clock()
+        dut._log.info(f"pc: {hex(c.next_pc())}, {c.o.external.value()}")
+        write = c.external_write()
+        if write is not None:
+            addr, data = write
+            assert addr == 0x00000044, f"addr: {hex(addr)}"
+            assert data == 0xdeadbeef, f"data: {hex(data)}"
+            return
 
-    assert False
+    assert False, "no write"
