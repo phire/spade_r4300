@@ -60,7 +60,7 @@ pipeline(1) instruction_cache(clk: clock, write: Option<(uint<11>, uint<20>, uin
         let mem3: Memory<uint<64>, 512> = inst clocked_memory(clk, [(en3, w_index, data)]);
 
         let Request$(en, index: read_index ) = inst read_mut_wire(request);
-        let read_word: uint<1> = trunc(read_index);
+        let read_word: uint<1> = ~trunc(read_index);
         let read_addr: uint<12> = trunc(read_index >> 1);
         let read_bank: uint<2> = trunc(read_addr >> 9);
 

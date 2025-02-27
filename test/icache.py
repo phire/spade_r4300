@@ -27,6 +27,7 @@ async def basic_check(dut):
     await cocotb.start(Clock(clk, 10, units='ns').start())
     s.i.addr = "0x0"
     s.i.write = none()
+    s.i.fetch_en = "false"
     await FallingEdge(clk)
 
     # write something to the cache
@@ -42,9 +43,9 @@ async def basic_check(dut):
     s.i.fetch_en = "true"
     await FallingEdge(clk)
     s.i.addr = "0x1c"
-    s.o.assert_eq(t("0xbeefcafe", "0xcab77", "true"))
-    await FallingEdge(clk)
     s.o.assert_eq(t("0xdead8888", "0xcab77", "true"))
+    await FallingEdge(clk)
+    s.o.assert_eq(t("0xbeefcafe", "0xcab77", "true"))
 
 #@cocotb.test()
 async def sequential(dut):
@@ -54,7 +55,7 @@ async def sequential(dut):
     await cocotb.start(Clock(clk, 10, units='ns').start())
     s.i.addr = "0x0"
     s.i.write = none()
-    s.i.en = "false"
+    s.i.fetch_en = "false"
 
     await FallingEdge(clk)
 
@@ -63,7 +64,7 @@ async def sequential(dut):
         tag = line | (0xdd << 10)
         for w in (0, 2, 4, 6):
             addr = (w >> 1) | (line << 2)
-            data = (hash(line, w + 1) << 32) | hash(line, w)
+            data = (hash(line, w) << 32) | hash(line, w + 1)
 
             s.i.write = some(t(addr, tag, data))
             await FallingEdge(clk)
@@ -99,13 +100,15 @@ async def random(dut):
 
     await cocotb.start(Clock(clk, 10, units='ns').start())
     await FallingEdge(clk)
+    s.i.addr = 0
+    s.i.fetch_en = "false"
 
     # fill some test pattern with test pattern
     for line in range(12):
         tag = line
         for w in (0, 2, 4, 6):
             addr = w >> 1 | line << 2
-            data = (hash(line, w + 1) << 32) | hash(line, w)
+            data = (hash(line, w) << 32) | hash(line, w + 1)
             s.i.write = some(t(addr, tag, data))
             await FallingEdge(clk)
 
