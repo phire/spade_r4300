@@ -456,7 +456,7 @@ pipeline(5) r4200_pipeline(
     // Load aligner:
         // The main shifter is used to align data for stores, but for timing
         // requirements, there is a separate shifter to align data from loads.
-        let aligned_load = mask.extract(dcache_access.data);
+        let aligned_load = mask.extract(dcache_access.data, true);
 
         // We need an explicit reg here so it updates even when stalled
         reg(phase2) dc_result = match inst_info.mem_mode {

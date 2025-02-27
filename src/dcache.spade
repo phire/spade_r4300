@@ -20,33 +20,12 @@ fn join<#uint B, #uint N, #uint M>(data: [[bool; N]; M]) -> uint<B> {
     std::conv::unsafe::unsafe_cast(data)
 }
 
-// fn zip<#A, #B, T1, T2> (a: [T1; A], b: [T2; B]) -> [(T1, T2); A] {
-//     ()
-// }
-
-fn byte_mux2(selects: [bool; 8] , a: uint<64>, b: uint<64>) -> uint<64> {
-    let s = selects;
-    let a = chunks::<64, 8, 8>(a);
-    let b = chunks::<64, 8, 8>(b);
-
-    join::<64, 8, 8>([
-        if s[0] { a[0] } else { b[0] },
-        if s[1] { a[1] } else { b[1] },
-        if s[2] { a[2] } else { b[2] },
-        if s[3] { a[3] } else { b[3] },
-        if s[4] { a[4] } else { b[4] },
-        if s[5] { a[5] } else { b[5] },
-        if s[6] { a[6] } else { b[6] },
-        if s[7] { a[7] } else { b[7] },
-    ])
-}
-
 impl MemMask {
     fn mask(self) -> uint<8> {
         (0b11111111 >> (7 - zext(self.size))) << zext(self.align)
     }
 
-    fn byte_mask(self) -> uint<64> {
+    fn bit_mask(self) -> uint<64> {
         let inv_size: uint<64> = 7 - zext(self.size);
         let right_shift = inv_size << 3;
         let left_shift = trunc(inv_size - zext(self.align)) << 3;
@@ -70,8 +49,26 @@ impl MemMask {
         byte0 `concat` byte1 `concat` byte2 `concat` byte3 `concat` byte4 `concat` byte5 `concat` byte6 `concat` byte7
     }
 
+
+    fn byte_mux2(self, a: uint<64>, b: uint<64>) -> uint<64> {
+        let s = uint_to_bits(self.mask());
+        let a = chunks::<64, 8, 8>(a);
+        let b = chunks::<64, 8, 8>(b);
+
+        join::<64, 8, 8>([
+            if s[0] { a[0] } else { b[0] },
+            if s[1] { a[1] } else { b[1] },
+            if s[2] { a[2] } else { b[2] },
+            if s[3] { a[3] } else { b[3] },
+            if s[4] { a[4] } else { b[4] },
+            if s[5] { a[5] } else { b[5] },
+            if s[6] { a[6] } else { b[6] },
+            if s[7] { a[7] } else { b[7] },
+        ])
+    }
+
     fn clear(self, dest: uint<64>) -> uint<64> {
-        let mask = self.byte_mask();
+        let mask = self.bit_mask();
         dest & ~mask
     }
 
@@ -81,16 +78,16 @@ impl MemMask {
     }
 
     fn insert(self, dest: uint<64>, data: uint<64>) -> uint<64> {
-        let mask = self.byte_mask();
+        let mask = self.bit_mask();
         (dest & ~mask) | (self.align(data) & mask)
     }
 
     fn insert_aligned(self, dest: uint<64>, data: uint<64>) -> uint<64> {
-        let mask = self.byte_mask();
+        let mask = self.bit_mask();
         dest & ~mask | data & mask
     }
 
-    fn extract(self, data: uint<64>) -> uint<64> {
+    fn extract(self, data: uint<64>, signed: bool ) -> uint<64> {
         let inv_size: uint<64> = 7 - zext(self.size);
         let left_shift = inv_size << 3;
         let right_shift = trunc(inv_size - zext(self.align)) << 3;
@@ -102,13 +99,50 @@ impl MemMask {
     }
 }
 
-
 fn mem_mask<N, M>(size: N, addr: M) -> MemMask {
     MemMask$ (size: trunc(size - 1), align: trunc(addr))
 }
 
 fn null_mask() -> MemMask {
     MemMask$ (size: 0, align: 0)
+}
+
+enum MaskTestMode {
+    BitMask,
+    ByteMask,
+    Size,
+    Clear,
+    Insert,
+    InsertAligned,
+    Extract,
+    ExtractSigned,
+    ByteMux,
+    ByteMux2,
+}
+
+#[no_mangle]
+pipeline(0) mask_test (
+    clk: clock,
+    mask: MemMask,
+    a: uint<64>,
+    b: uint<64>,
+    mode: MaskTestMode,
+)
+  -> uint<64>
+{
+    match mode {
+        MaskTestMode::ByteMask => zext(mask.mask()),
+        MaskTestMode::BitMask => mask.bit_mask(),
+        MaskTestMode::Size => zext(mask.size()),
+        MaskTestMode::Clear => mask.clear(a),
+        MaskTestMode::Insert => mask.insert(a, b),
+        MaskTestMode::InsertAligned => mask.insert_aligned(a, b),
+        MaskTestMode::Extract => mask.extract(a, false),
+        MaskTestMode::ExtractSigned => mask.extract(a, true),
+        MaskTestMode::ByteMux => mask.byte_mux(b, a),
+        MaskTestMode::ByteMux2 => mask.byte_mux2(b, a),
+    }
+
 }
 
 struct DResult {
