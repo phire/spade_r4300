@@ -326,6 +326,34 @@ async def load_word(dut):
         nop(4),
     ]
 
+    writes = await do_stores(p, prog, dut, {0x30: 0xfccffccf00000000})
+
+    assert writes, "No write found"
+
+    row, data = writes[0]
+    addr = row << 3
+    dut._log.info(f"addr: {addr:x}, data: {data:x}")
+    assert addr == 0x70
+    assert data == 0x11223344fccffccf
+
+
+@cocotb.test()
+async def load_word_upper(dut):
+    p = Pipeline(dut)
+    await p.start()
+
+    prog = [
+        # load a word
+        itype(0b100011, 0, 3, 0x0034), # lw $r3, 0x34($zero)
+        nop(),
+        # and store it back
+        itype(0b101011, 0, 3, 0x0074), # sw $r3, 0x74($zero)
+        nop(1),
+        nop(2),
+        nop(3),
+        nop(4),
+    ]
+
     writes = await do_stores(p, prog, dut, {0x30: 0x00000000fccffccf})
 
     assert writes, "No write found"
@@ -334,7 +362,6 @@ async def load_word(dut):
     addr = row << 3
     dut._log.info(f"addr: {addr:x}, data: {data:x}")
     assert addr == 0x70
-    #assert mask == 0x00000000ffffffff
     assert data == 0x11223344fccffccf
 
 @cocotb.test()
@@ -345,7 +372,7 @@ async def load_interlock(dut):
 
     prog = [
         # load a word
-        itype(0b100011, 0, 3, 0x0030), # lw $r3, 0x30($zero)
+        itype(0b100011, 0, 3, 0x0034), # lw $r3, 0x30($zero)
         # and store it back
         itype(0b101011, 0, 3, 0x0074), # sw $r3, 0x74($zero)
         nop(1),
