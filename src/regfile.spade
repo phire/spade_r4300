@@ -60,8 +60,8 @@ pipeline(1) regfile(
              0, 0, 0, 0, 0, 0, 0, 0]
         );
 
-        let rs_val = if en_s { inst read_memory(regs, rs.index()) } else { 0 };
-        let rt_val = if en_t { inst read_memory(regs, rt.index()) } else { 0 };
+        let rs_val = if en_s { inst read_memory(regs, rs.index()) } else { stage(+1).rs_val };
+        let rt_val = if en_t { inst read_memory(regs, rt.index()) } else { stage(+1).rt_val };
 
     reg;
         (rs_val, rt_val)

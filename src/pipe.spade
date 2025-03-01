@@ -128,7 +128,7 @@ impl Bypass {
     }
 }
 
-fn check_bypass(reg_id: RegId, ex_dest: RegId, dc_dest: RegId) -> (bool, Bypass) {
+fn check_bypass(reg_id: RegId, ex_dest: RegId, dc_dest: RegId, ready: bool) -> (bool, Bypass) {
     if reg_id.is_zero() {
         // Don't bypass the $zero register as we might get non-zero values
         // from writes and instructions that are writing to the zero register.
@@ -138,7 +138,7 @@ fn check_bypass(reg_id: RegId, ex_dest: RegId, dc_dest: RegId) -> (bool, Bypass)
     } else if dc_dest.index() == reg_id.index() {
         (false, Bypass::DcResult)
     } else {
-        (true, Bypass::Normal)
+        (ready, Bypass::Normal)
     }
 }
 
@@ -221,8 +221,8 @@ pipeline(5) r4200_pipeline(
         //     certain times when the read operand is being bypassed from a
         //     later pipeline stage." - unified datapath paper
 
-        let (en_s, rs_bypass) = check_bypass(rs, stage(EX).dest, stage(DC).dest);
-        let (en_t, rt_bypass) = check_bypass(rt, stage(EX).dest, stage(DC).dest);
+        let (en_s, rs_bypass) = check_bypass(rs, stage(EX).dest, stage(DC).dest, stage.ready);
+        let (en_t, rt_bypass) = check_bypass(rt, stage(EX).dest, stage(DC).dest, stage.ready);
 
         let write = stage(WB).regfile_write;
         let (rs_read, rt_read) = inst(1) regfile$(phase2, phase1, rs, rt, en_s, en_t, write);
@@ -268,11 +268,12 @@ pipeline(5) r4200_pipeline(
             _ => (false, false),
         };
 
-        let load_interlock = (rs_interlock || rt_interlock) && !stage(DC).load_done;
+        let load_interlock = (rs_interlock || rt_interlock);
+        let load_interlock_busy = load_interlock && !stage(DC).mem_done;
 
     // Bypass muxes
-        let rs_val = rs_bypass.apply(rs_read, stage(DC).ex_result, stage(DC).dc_result, rs_interlock);
-        let rt_val = rt_bypass.apply(rt_read, stage(DC).ex_result, stage(DC).dc_result, rt_interlock);
+        let rs_val = rs_bypass.apply(rs_read, stage(DC).ex_result, stage(DC).dc_bypass, rs_interlock);
+        let rt_val = rt_bypass.apply(rt_read, stage(DC).ex_result, stage(DC).dc_bypass, rt_interlock);
 
     // Immediate sign extend:
         let imm16: uint<16> = trunc(ins);
@@ -377,7 +378,7 @@ pipeline(5) r4200_pipeline(
         };
 
         // Start the dcache access now
-        set dcache.index = if dcache_en { Some(index) } else { None };
+        set dcache.index = if dcache_en && !load_interlock_busy { Some(index) } else { None };
 
     // R Mux:
         // Logically it would make more sense to have a single 3-way Result mux later on.
@@ -423,7 +424,7 @@ pipeline(5) r4200_pipeline(
         };
         let flush = flush || ex_flushing || stage(DC).dc_flushing;
 
-        let interlock = if load_interlock {
+        let interlock = if load_interlock_busy {
             Interlock::LoadInterlock
         } else if false {
             Interlock::MultiCycleInterlock
@@ -436,30 +437,34 @@ pipeline(5) r4200_pipeline(
     reg;
         'DC // Data Cache
 
-        reg(phase2) load_done = !stage.ready;
+        reg(phase2) mem_done = !stage.ready;
 
         // TODO: Get real tag from TLB
-        let expected_tag: uint<20> = trunc(data_virtual_address >> 12);
+        let tlb_tag: uint<20> = trunc(data_virtual_address >> 12);
+        let tlb_dirty = true; // The TLB's dirty bit means writes are allowed.
+        let tlb_valid = true;
+
         let external = data_virtual_address & 0xe0000000 == 0xa0000000;
         let external_addr: uint<29> = trunc(data_virtual_address);
 
         let dcache_access = *dcache.result;
         let read_data = dcache_access.data;
 
-        let tag_matched = dcache_access.tag.tag == expected_tag;
-        let valid = dcache_access.tag.valid;
+        let tag_matched = dcache_access.tag.tag == tlb_tag;
+        let valid = dcache_access.tag.valid && tlb_valid;
         let dcache_miss = dcache_en && !(valid && tag_matched);
-        let write_blocked = dcache_write_en && !dcache_access.tag.dirty;
+        let write_blocked = dcache_write_en && !tlb_dirty;
 
-        let write_data = if dcache_write_en { mask.insert_aligned(read_data, ex_result) } else { 0 };
+        let write_data = mask.insert_aligned(read_data, ex_result);
+        let write_en = dcache_write_en && tlb_dirty && !flush && !mem_done;
+        set dcache.write = if write_en && !external { Some(write_data) } else { None };
 
     // Load aligner:
         // The main shifter is used to align data for stores, but for timing
         // requirements, there is a separate shifter to align data from loads.
         let aligned_load = mask.extract(dcache_access.data, true);
 
-        // We need an explicit reg here so it updates even when stalled
-        reg(phase2) dc_result = match inst_info.mem_mode {
+        let dc_result = match inst_info.mem_mode {
             MemMode::Nop => ex_result,
             MemMode::Load => aligned_load,
             MemMode::Store => 0,
@@ -467,6 +472,11 @@ pipeline(5) r4200_pipeline(
             MemMode::LinkedLoad => aligned_load,
             MemMode::ConditionalStore => 1,
         };
+
+        // We need an explicit reg here so it updates even when stalled
+        // load interlocks are implemented by stalling for a cycle, and picking up
+        // the load result in the next cycle.
+        let dc_bypass = if stage(EX).load_interlock { dc_result } else { stage(WB).dc_result };
 
         let (dc_flushing, dc_exception) = if stage(IC).rst {
             (true, Exception::Reset)
@@ -486,7 +496,7 @@ pipeline(5) r4200_pipeline(
 
         let interlock = if dcache_miss && !external {
             Interlock::DataCacheMiss
-        } else if dcache_access.busy {
+        } else if write_en && stage(EX).dcache_en && !mem_done {
             Interlock::DataCacheBusy
         } else if false {
             Interlock::CacheOp
@@ -498,10 +508,9 @@ pipeline(5) r4200_pipeline(
         'WB // Writeback
 
         let en = !flush && stage.ready;
+        let wb_reg = if en { dest } else { RegId::Integer(0) };
+        let regfile_write = (wb_reg, dc_result);
 
-        // directly access the dc_result reg, otherwise it would be delayed a cycle
-        let regfile_write = (if en { dest } else { RegId::Integer(0) }, stage(-1).dc_result);
-        set dcache.write = if dcache_write_en && !external && en { Some(write_data) } else { None };
         let external_write = ExternalRequest$(addr: concat(0, external_addr), data: ex_result, size: mask.size, write: dcache_write_en && external && en);
 
         let interlock = if false {

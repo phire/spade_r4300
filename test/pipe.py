@@ -201,26 +201,31 @@ async def do_stores(p, prog, dut, loads=dict()):
 
     for _ in range(1000):
         # simulate icache reads as completing halfway though the cycle
-        p.i.ins = "0"
-        await p.halfclock()
+        if p.phase1.value == 0:
+            p.i.ins = 0
+            await p.halfclock()
+
         pc_index = p.index()
         if pc_index >= len(prog):
+            dut._log.info(f"index: {pc_index:04x}, inst: [end], status: {p.status()}")
             return writes
         inst = prog[pc_index]
 
         p.set_inst(inst)
         await p.clock()
 
-        dut._log.info(f"index: {p.index():04x}, inst: {inst:08x}, status: {p.status()}")
+        dut._log.info(f"index: {pc_index:04x}, inst: {inst:08x}, status: {p.status()}")
 
-        assert p.status() in ["Ok()", "Stall(LoadInterlock())", "ExceptionWB(Reset())"]
+        assert p.status() in ["Ok()", "Stall(LoadInterlock())", "Stall(DataCacheBusy())", "ExceptionWB(Reset())"]
 
         if p.is_write():
-            if open_row is None:
+            if p.open_row is None:
                 dut._log.info(f"writing: {p.write():x} after row closed")
             else:
-                dut._log.info(f"writing: {p.write():x} to {open_row << 3:x}")
-                writes.append((open_row, p.write()))
+                dut._log.info(f"writing: {p.write():x} to {p.open_row << 3:x}")
+                writes.append((p.open_row, p.write()))
+                p.open_row = None
+            continue
 
         index = p.d_index()
 
@@ -232,12 +237,7 @@ async def do_stores(p, prog, dut, loads=dict()):
                 p.i.data = "0x1122334455667788"
             p.i.d_tag = "0"
             p.i.d_valid = "true"
-            open_row = p.d_index()
-        else:
-            #open_row = None
-            p.i.d_valid = "false"
-            p.i.data = "0"
-            p.i.d_tag = "0"
+            p.open_row = p.d_index()
 
     raise Exception("Timeout")
 
@@ -391,7 +391,74 @@ async def load_interlock(dut):
     assert data & 0xffffffff == 0xfccffccf
 
 @cocotb.test()
+async def dcache_busy(dut):
+    """A load following a store should stall for one cycle"""
+    p = Pipeline(dut)
+    await p.start()
+
+    prog = [
+        # store
+        *lwi(3, 0xdeadbeef),
+        itype(0b101011, 0, 3, 0x0074), # sw $r3, 0x74($zero)
+        # back to back stores
+        itype(0b101000, 0, 3, 0x0076), # sb $r3, 0x78($zero)
+        # then a load
+        itype(0b100011, 0, 3, 0x0034), # lw $r3, 0x30($zero)
+        nop(1),
+    ]
+
+    writes = await do_stores(p, prog[:-2], dut)
+    assert writes == []
+    assert p.status() == "Stall(DataCacheBusy())"
+
+    writes = await do_stores(p, prog[:-1], dut)
+    assert writes == [(0x70 >> 3, 0x11223344deadbeef)]
+    assert p.status() == "Stall(DataCacheBusy())"
+
+    # make sure it clears
+    writes = await do_stores(p, prog, dut)
+    assert writes == [(0x70 >> 3, 0x112233445566ef88)]
+
+
+    assert p.status() == "Ok()"
+
+@cocotb.test()
+async def store_interlock(dut):
+    """Same as store_word, but without the nop"""
+
+    p = Pipeline(dut)
+    await p.start()
+
+    prog = [
+        lui(7, 0xdead),
+        ori(7, 7, 0xbeef),
+        itype(0b101011, 0, 7, 0x0044), # sw $r7, 0x44($zero)
+        itype(0b101011, 0, 7, 0x0268), # sw $r7, 0x268($zero)
+        nop(),
+        nop(),
+        nop(),
+        nop(),
+    ]
+
+    writes = await do_stores(p, prog, dut)
+
+    assert writes, "No write found"
+
+    row, data = writes[0]
+    addr = row << 3
+    dut._log.info(f"word: {addr}, data: {data:x}")
+    assert addr == 0x40
+    assert data == 0x11223344deadbeef
+
+    row, data = writes[1]
+    addr = row << 3
+    dut._log.info(f"word: {addr}, data: {data:x}")
+    assert addr == 0x268
+    assert data == 0xdeadbeef55667788
+
+@cocotb.test()
 async def bypassing(dut):
+    """This test is worth it's weight in gold"""
     p = Pipeline(dut)
     await p.start()
 
@@ -399,20 +466,25 @@ async def bypassing(dut):
         lui(8, 0xdead),
         ori(7, 8, 0xbeef),
         # these ORI instructions test bypassing on RS
-        ori(1, 7, 0),
-        ori(2, 7, 0),
-        ori(3, 7, 0),
-        ori(4, 7, 0),
+        ori(1, 7, 0), # bypass RS from EX
+        ori(2, 7, 0), # bypass RS from DC
+        ori(3, 7, 0), # same-cycle regfile write and read
+        ori(4, 7, 0), # normal, RS from regfile
+        # these stores should all read from regfile
         itype(0b101011, 0, 1, 0x54), # sw $r1, 0x54($zero)
-        itype(0b101011, 0, 2, 0x54), # sw $r2, 0x54($zero)
-        itype(0b101011, 0, 3, 0x54), # sw $r3, 0x54($zero)
-        itype(0b101011, 0, 4, 0x54), # sw $r4, 0x54($zero)
+        itype(0b101011, 0, 2, 0x64), # sw $r2, 0x64($zero)
+        itype(0b101011, 0, 3, 0x74), # sw $r3, 0x74($zero)
+        itype(0b101011, 0, 4, 0x84), # sw $r4, 0x84($zero)
         ori(9, 8, 0xbeef),
         # and these stores are bypassing on RT from the ori above
+        # bypass RT from EX
         itype(0b101011, 0, 9, 0x54), # sw $r7, 0x54($zero)
-        itype(0b101011, 0, 9, 0x54), # sw $r7, 0x54($zero)
-        itype(0b101011, 0, 9, 0x54), # sw $r7, 0x54($zero)
-        itype(0b101011, 0, 9, 0x54), # sw $r7, 0x54($zero)
+        # bypass RT from DC
+        itype(0b101011, 0, 9, 0x64), # sw $r7, 0x64($zero)
+        # same-cycle regfile write and read
+        itype(0b101011, 0, 9, 0x74), # sw $r7, 0x74($zero)
+        # normal, RT from regfile
+        itype(0b101011, 0, 9, 0x84), # sw $r7, 0x84($zero)
         nop(),
         nop(),
         nop(),
